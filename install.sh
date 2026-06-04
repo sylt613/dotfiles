@@ -4,7 +4,7 @@ echo "🚀 AI Coding Environment Setup"
 
 # Extensions
 echo "🧩 Installing extensions..."
-for ext in "wienans.opencode-zen-chat-provider" "calgan.oai-provider" "github.vscode-pull-request-github" "ms-python.python"; do
+for ext in "wienans.opencode-zen-chat-provider" "calgan.oai-provider" "github.vscode-pull-request-github" "ms-python.python" "anthropic.claude-code"; do
     code --install-extension "$ext" --force 2>/dev/null && echo "  ✅ $ext" || echo "  ⚠️ $ext"
 done
 
@@ -39,4 +39,31 @@ else:
     print("  ℹ️ No keys found")
 INNERPY
 export SETTINGS_FILE="$SF"
+
+# ── Claude Code CLI ──────────────────────────────────────────────────────────
+echo "🤖 Setting up Claude Code CLI..."
+
+# Ensure Node.js is available
+if ! command -v node &>/dev/null; then
+    curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - 2>/dev/null
+    sudo apt-get install -y nodejs 2>/dev/null
+fi
+
+# Install Claude Code globally
+if ! command -v claude &>/dev/null; then
+    npm install -g @anthropic-ai/claude-code 2>/dev/null && echo "  ✅ claude installed" || echo "  ⚠️ claude install failed"
+else
+    echo "  ✅ claude already installed ($(claude --version 2>/dev/null | head -1))"
+fi
+
+# Restore OAuth credentials from Codespaces secret
+if [ -n "${CLAUDE_CREDENTIALS}" ]; then
+    mkdir -p "${HOME}/.claude"
+    echo "${CLAUDE_CREDENTIALS}" > "${HOME}/.claude/.credentials.json"
+    chmod 600 "${HOME}/.claude/.credentials.json"
+    echo "  ✅ Claude credentials restored"
+else
+    echo "  ℹ️  No CLAUDE_CREDENTIALS secret found — run 'claude login' to authenticate"
+fi
+
 echo "✅ Done!"
