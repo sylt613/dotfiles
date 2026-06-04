@@ -13,13 +13,14 @@ echo "🔑 Configuring OAIProvider..."
 for d in "${HOME}/.vscode-remote/data/Machine" "${HOME}/.vscode-server/data/Machine"; do
     [ -d "$d" ] && { SD="$d"; break; }
 done
-[ -z "${SD}" ] && { echo "  ⚠️ VS Code not ready"; exit 0; }
 
-SF="${SD}/settings.json"
-mkdir -p "${SD}"
-[ ! -f "$SF" ] && echo '{}' > "$SF"
+if [ -n "${SD}" ]; then
+    SF="${SD}/settings.json"
+    mkdir -p "${SD}"
+    [ ! -f "$SF" ] && echo '{}' > "$SF"
+    export SETTINGS_FILE="$SF"
 
-python3 << 'INNERPY'
+    python3 << 'INNERPY'
 import json, os
 s = os.environ.get("SETTINGS_FILE","")
 if not s or not os.path.exists(s): exit(0)
@@ -38,32 +39,54 @@ if pro:
 else:
     print("  ℹ️ No keys found")
 INNERPY
-export SETTINGS_FILE="$SF"
+else
+    echo "  ⚠️ VS Code not ready, skipping provider config"
+fi
 
 # ── Claude Code CLI ──────────────────────────────────────────────────────────
 echo "🤖 Setting up Claude Code CLI..."
 
 # Ensure Node.js is available
 if ! command -v node &>/dev/null; then
-    curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - 2>/dev/null
-    sudo apt-get install -y nodejs 2>/dev/null
+    echo "  📦 Installing Node.js..."
+    curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - >/dev/null 2>&1
+    sudo apt-get install -y nodejs >/dev/null 2>&1
 fi
 
 # Install Claude Code globally
 if ! command -v claude &>/dev/null; then
-    npm install -g @anthropic-ai/claude-code 2>/dev/null && echo "  ✅ claude installed" || echo "  ⚠️ claude install failed"
+    npm install -g @anthropic-ai/claude-code >/dev/null 2>&1 && echo "  ✅ claude installed" || echo "  ⚠️ claude install failed"
 else
     echo "  ✅ claude already installed ($(claude --version 2>/dev/null | head -1))"
 fi
 
-# Restore OAuth credentials from Codespaces secret
-if [ -n "${CLAUDE_CREDENTIALS}" ]; then
-    mkdir -p "${HOME}/.claude"
-    echo "${CLAUDE_CREDENTIALS}" > "${HOME}/.claude/.credentials.json"
-    chmod 600 "${HOME}/.claude/.credentials.json"
-    echo "  ✅ Claude credentials restored"
+# OAuth auth: CLAUDE_CODE_OAUTH_TOKEN is injected automatically as a Codespaces
+# secret, so the CLI is logged in on every codespace with no manual step.
+if [ -n "${CLAUDE_CODE_OAUTH_TOKEN}" ]; then
+    echo "  ✅ OAuth token present — Claude Code is authenticated"
 else
-    echo "  ℹ️  No CLAUDE_CREDENTIALS secret found — run 'claude login' to authenticate"
+    echo "  ⚠️ CLAUDE_CODE_OAUTH_TOKEN not set (add it at github.com/settings/codespaces)"
 fi
+
+# Configure Claude Code to run all commands without permission prompts
+echo "  ⚙️  Configuring auto-approve (bypassPermissions)..."
+mkdir -p "${HOME}/.claude"
+CLAUDE_SETTINGS="${HOME}/.claude/settings.json"
+[ ! -f "$CLAUDE_SETTINGS" ] && echo '{}' > "$CLAUDE_SETTINGS"
+export CLAUDE_SETTINGS
+python3 << 'CLAUDEPY'
+import json, os
+p = os.environ["CLAUDE_SETTINGS"]
+with open(p) as f:
+    try: cfg = json.load(f)
+    except: cfg = {}
+perms = cfg.get("permissions", {})
+perms["defaultMode"] = "bypassPermissions"
+cfg["permissions"] = perms
+cfg.setdefault("theme", "auto")
+with open(p, "w") as f:
+    json.dump(cfg, f, indent=2)
+print("  ✅ All commands auto-approved")
+CLAUDEPY
 
 echo "✅ Done!"
