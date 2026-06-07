@@ -163,8 +163,9 @@ while true; do
 done
 KEEPALIVE
     chmod +x /tmp/.cs_keepalive.sh
+    pkill -f cs_keepalive 2>/dev/null || true  # kill stale instance from previous start
     nohup /tmp/.cs_keepalive.sh >>/tmp/.cs_keepalive.log 2>&1 &
-    echo "  ✅ Smart keep-alive started (dynamic timeout: 240min active / 15min idle)"
+    echo "  ✅ Smart keep-alive started (dynamic timeout: 240min active / 30min idle)"
 else
     echo "  ⚠️ GH_CODESPACE_PAT not set — keep-alive inactive (add it at github.com/settings/codespaces)"
 fi
