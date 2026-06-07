@@ -123,17 +123,23 @@ if [ -n "${CODESPACE_NAME:-}" ]; then
         echo "  ⚠️ Could not set idle timeout via API"
 fi
 
-# 2) Smart keep-alive: checks every 2 min whether 'claude' is running.
-#    Only pings GitHub when Claude is active — so idle codespaces still
-#    stop after 15 min, but an active Claude session is never killed.
+# 2) Smart keep-alive: only pings GitHub when Claude Code is actively
+#    processing (writing to its session files). Claude writes to .jsonl
+#    session files continuously while working; at the idle prompt it writes
+#    nothing. So "recent .jsonl write = Claude is busy" is the signal.
 if [ -n "${CODESPACE_NAME:-}" ] && [ -n "${GITHUB_TOKEN:-}" ]; then
     cat > /tmp/.cs_keepalive.sh << 'KEEPALIVE'
 #!/bin/bash
-# Ping GitHub only while claude process is running.
-# When claude is idle/stopped, do nothing → 15-min timeout fires normally.
+# Every 2 min: check if Claude wrote to session files since last check.
+# If yes = Claude is actively working → ping to reset idle timer.
+# If no  = Claude is idle at prompt or not running → do nothing → timeout fires.
 while true; do
+    MARKER=$(mktemp /tmp/.cs_mark.XXXXXX)
     sleep 120
-    if pgrep -x "claude" >/dev/null 2>&1 || pgrep -f "claude-code" >/dev/null 2>&1; then
+    WROTE=$(find ~/.claude/projects ~/.claude/sessions \
+        -newer "$MARKER" -name "*.jsonl" 2>/dev/null | head -1)
+    rm -f "$MARKER"
+    if [ -n "$WROTE" ]; then
         curl -s -o /dev/null \
             -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H "Accept: application/vnd.github+json" \
@@ -143,7 +149,7 @@ done
 KEEPALIVE
     chmod +x /tmp/.cs_keepalive.sh
     nohup /tmp/.cs_keepalive.sh >>/tmp/.cs_keepalive.log 2>&1 &
-    echo "  ✅ Smart keep-alive started — only active while Claude is running"
+    echo "  ✅ Smart keep-alive started — only fires while Claude is actively working"
 fi
 
 echo "✅ Done!"
