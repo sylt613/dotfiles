@@ -123,16 +123,16 @@ if [ -n "${CODESPACE_NAME:-}" ]; then
         echo "  ⚠️ Could not set idle timeout via API"
 fi
 
-# 2) Smart keep-alive: only pings GitHub when Claude Code is actively
-#    processing (writing to its session files). Claude writes to .jsonl
-#    session files continuously while working; at the idle prompt it writes
-#    nothing. So "recent .jsonl write = Claude is busy" is the signal.
-if [ -n "${CODESPACE_NAME:-}" ] && [ -n "${GITHUB_TOKEN:-}" ]; then
+# 2) Smart keep-alive: adjusts the codespace idle timeout dynamically.
+#    Claude writes to .jsonl session files while processing; idle prompt = no writes.
+#    Active Claude → set timeout to 240 min (won't be killed mid-task).
+#    Idle/stopped Claude → set timeout back to 15 min (stops fast, saves money).
+#    Requires GH_CODESPACE_PAT secret (full-scope PAT) — built-in GITHUB_TOKEN
+#    lacks codespace scope so can't call the Codespaces API.
+if [ -n "${CODESPACE_NAME:-}" ] && [ -n "${GH_CODESPACE_PAT:-}" ]; then
     cat > /tmp/.cs_keepalive.sh << 'KEEPALIVE'
 #!/bin/bash
-# Every 2 min: check if Claude wrote to session files since last check.
-# If yes = Claude is actively working → ping to reset idle timer.
-# If no  = Claude is idle at prompt or not running → do nothing → timeout fires.
+CURRENT_TIMEOUT=15
 while true; do
     MARKER=$(mktemp /tmp/.cs_mark.XXXXXX)
     sleep 120
@@ -140,16 +140,33 @@ while true; do
         -newer "$MARKER" -name "*.jsonl" 2>/dev/null | head -1)
     rm -f "$MARKER"
     if [ -n "$WROTE" ]; then
-        curl -s -o /dev/null \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/user/codespaces/$CODESPACE_NAME" || true
+        # Claude is actively working — extend timeout to 240 min
+        if [ "$CURRENT_TIMEOUT" != "240" ]; then
+            curl -s -o /dev/null -X PATCH \
+                -H "Authorization: Bearer $GH_CODESPACE_PAT" \
+                -H "Accept: application/vnd.github+json" \
+                -H "Content-Type: application/json" \
+                "https://api.github.com/user/codespaces/$CODESPACE_NAME" \
+                -d '{"idle_timeout_minutes":240}' && CURRENT_TIMEOUT=240
+        fi
+    else
+        # Claude is idle — restore 15-min timeout so codespace stops on schedule
+        if [ "$CURRENT_TIMEOUT" != "15" ]; then
+            curl -s -o /dev/null -X PATCH \
+                -H "Authorization: Bearer $GH_CODESPACE_PAT" \
+                -H "Accept: application/vnd.github+json" \
+                -H "Content-Type: application/json" \
+                "https://api.github.com/user/codespaces/$CODESPACE_NAME" \
+                -d '{"idle_timeout_minutes":15}' && CURRENT_TIMEOUT=15
+        fi
     fi
 done
 KEEPALIVE
     chmod +x /tmp/.cs_keepalive.sh
     nohup /tmp/.cs_keepalive.sh >>/tmp/.cs_keepalive.log 2>&1 &
-    echo "  ✅ Smart keep-alive started — only fires while Claude is actively working"
+    echo "  ✅ Smart keep-alive started (dynamic timeout: 240min active / 15min idle)"
+else
+    echo "  ⚠️ GH_CODESPACE_PAT not set — keep-alive inactive (add it at github.com/settings/codespaces)"
 fi
 
 echo "✅ Done!"
