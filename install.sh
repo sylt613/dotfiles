@@ -169,4 +169,21 @@ else
     echo "  ⚠️ GH_CODESPACE_PAT not set — keep-alive inactive (add it at github.com/settings/codespaces)"
 fi
 
+# ── Wire up git and gh CLI with full-scope GitHub PAT ────────────────────────
+echo "🔗 Configuring git and gh CLI..."
+if [ -n "${GH_CODESPACE_PAT:-}" ]; then
+    # gh CLI respects GH_TOKEN; prefer the full-scope PAT over the
+    # repo-scoped auto-injected GITHUB_TOKEN so private repos and all APIs work
+    grep -qxF 'export GH_TOKEN="$GH_CODESPACE_PAT"' ~/.bashrc 2>/dev/null || \
+        echo 'export GH_TOKEN="$GH_CODESPACE_PAT"' >> ~/.bashrc
+    # git credential store with full-scope PAT
+    git config --global credential.helper store
+    GIT_USER=$(GH_TOKEN="$GH_CODESPACE_PAT" gh api /user --jq '.login' 2>/dev/null || echo "sylt613")
+    printf 'https://%s:%s@github.com\n' "$GIT_USER" "$GH_CODESPACE_PAT" > ~/.git-credentials
+    chmod 600 ~/.git-credentials
+    echo "  ✅ git and gh CLI configured with full-scope PAT (user: $GIT_USER)"
+else
+    echo "  ⚠️ GH_CODESPACE_PAT not set — git/gh will use repo-scoped token only"
+fi
+
 echo "✅ Done!"
