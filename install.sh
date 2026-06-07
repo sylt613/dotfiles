@@ -60,12 +60,33 @@ else
     echo "  ✅ claude already installed ($(claude --version 2>/dev/null | head -1))"
 fi
 
-# OAuth auth: CLAUDE_CODE_OAUTH_TOKEN is injected automatically as a Codespaces
-# secret, so the CLI is logged in on every codespace with no manual step.
-if [ -n "${CLAUDE_CODE_OAUTH_TOKEN}" ]; then
-    echo "  ✅ OAuth token present — Claude Code is authenticated"
+# ── Write credentials.json from CLAUDE_CREDENTIALS_JSON (has refresh token) ──
+if [ -n "${CLAUDE_CREDENTIALS_JSON:-}" ]; then
+    echo "  🔑 Seeding ~/.claude/.credentials.json from CLAUDE_CREDENTIALS_JSON..."
+    mkdir -p "${HOME}/.claude"
+    CRED_DST="${HOME}/.claude/.credentials.json"
+    printf '%s' "$CLAUDE_CREDENTIALS_JSON" | base64 -d > /tmp/.cred_seed.json 2>/dev/null || true
+    if python3 -c "import json; json.load(open('/tmp/.cred_seed.json'))['claudeAiOauth']" 2>/dev/null; then
+        seed_exp=$(python3 -c "import json; print(json.load(open('/tmp/.cred_seed.json'))['claudeAiOauth'].get('expiresAt',0))" 2>/dev/null || echo 0)
+        cur_exp=0
+        if [ -f "$CRED_DST" ]; then
+            cur_exp=$(python3 -c "import json; print(json.load(open('$CRED_DST'))['claudeAiOauth'].get('expiresAt',0))" 2>/dev/null || echo 0)
+        fi
+        if [ ! -f "$CRED_DST" ] || [ "${seed_exp:-0}" -gt "${cur_exp:-0}" ]; then
+            cp /tmp/.cred_seed.json "$CRED_DST"
+            chmod 600 "$CRED_DST"
+            echo "  ✅ credentials.json written (with refresh token)"
+        else
+            echo "  ✅ credentials.json kept (live copy is newer)"
+        fi
+    else
+        echo "  ⚠️ CLAUDE_CREDENTIALS_JSON is not valid JSON — skipping"
+    fi
+    rm -f /tmp/.cred_seed.json
+elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    echo "  ✅ OAuth token present via CLAUDE_CODE_OAUTH_TOKEN (no refresh token)"
 else
-    echo "  ⚠️ CLAUDE_CODE_OAUTH_TOKEN not set (add it at github.com/settings/codespaces)"
+    echo "  ⚠️ No Claude auth found — add CLAUDE_CODE_OAUTH_TOKEN to github.com/settings/codespaces"
 fi
 
 # Configure Claude Code to run all commands without permission prompts
