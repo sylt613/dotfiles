@@ -110,43 +110,40 @@ with open(p, "w") as f:
 print("  ✅ All commands auto-approved")
 CLAUDEPY
 
-# ── Prevent codespace idle-timeout during long Claude sessions ────────────────
-echo "⏰ Configuring keep-alive..."
+# ── Prevent codespace from stopping mid-Claude-session ───────────────────────
+echo "⏰ Configuring smart keep-alive..."
 
-# 1) Set this codespace's idle timeout to the maximum (240 min = 4 hours)
+# 1) Keep the default 15-min idle timeout (saves money when not working).
+#    The pinger below only fires when Claude is actually running, so idle
+#    codespaces still stop on schedule.
 if [ -n "${CODESPACE_NAME:-}" ]; then
     gh api --method PATCH "/user/codespaces/$CODESPACE_NAME" \
-        -f idle_timeout_minutes=240 >/dev/null 2>&1 && \
-        echo "  ✅ Idle timeout set to 240 min (4 hours)" || \
-        echo "  ⚠️ Could not set idle timeout via API (set manually: github.com/settings/codespaces)"
+        -f idle_timeout_minutes=15 >/dev/null 2>&1 && \
+        echo "  ✅ Idle timeout set to 15 min (stops fast when idle)" || \
+        echo "  ⚠️ Could not set idle timeout via API"
 fi
 
-# 2) Background keep-alive: ping the codespace API every 10 min so GitHub
-#    sees network activity and does not mark the machine as idle.
-#    Uses the built-in GITHUB_TOKEN which always has codespace scope.
+# 2) Smart keep-alive: checks every 2 min whether 'claude' is running.
+#    Only pings GitHub when Claude is active — so idle codespaces still
+#    stop after 15 min, but an active Claude session is never killed.
 if [ -n "${CODESPACE_NAME:-}" ] && [ -n "${GITHUB_TOKEN:-}" ]; then
     cat > /tmp/.cs_keepalive.sh << 'KEEPALIVE'
 #!/bin/bash
-# Runs in background; sends a harmless API read every 10 min.
-# GitHub counts outbound network from the codespace as activity.
+# Ping GitHub only while claude process is running.
+# When claude is idle/stopped, do nothing → 15-min timeout fires normally.
 while true; do
-    sleep 600
-    curl -s -o /dev/null \
-        -H "Authorization: Bearer $GITHUB_TOKEN" \
-        -H "Accept: application/vnd.github+json" \
-        "https://api.github.com/user/codespaces/$CODESPACE_NAME" || true
+    sleep 120
+    if pgrep -x "claude" >/dev/null 2>&1 || pgrep -f "claude-code" >/dev/null 2>&1; then
+        curl -s -o /dev/null \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/user/codespaces/$CODESPACE_NAME" || true
+    fi
 done
 KEEPALIVE
     chmod +x /tmp/.cs_keepalive.sh
     nohup /tmp/.cs_keepalive.sh >>/tmp/.cs_keepalive.log 2>&1 &
-    echo "  ✅ Keep-alive pinger started (PID $!)"
-fi
-
-# 3) Install tmux so Claude sessions survive browser tab closes
-if ! command -v tmux &>/dev/null; then
-    sudo apt-get install -y tmux >/dev/null 2>&1 && echo "  ✅ tmux installed" || echo "  ⚠️ tmux install failed"
-else
-    echo "  ✅ tmux already available"
+    echo "  ✅ Smart keep-alive started — only active while Claude is running"
 fi
 
 echo "✅ Done!"
