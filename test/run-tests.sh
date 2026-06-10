@@ -224,7 +224,7 @@ fi
 # ── 7. session-init self-heal (secret appears after creation) ────────────────
 CURRENT="session-init-heal"
 say "▶ $CURRENT"
-pkill -f "vscode-setup.sh" 2>/dev/null; sleep 1   # clear any lingering watchers so pgrep guard can't misfire
+pkill -f "$ROOT/vscode-setup.sh" 2>/dev/null; sleep 1   # clear any lingering watchers so pgrep guard can't misfire
 new_sandbox
 make_code_server "$VSROOT/bin/linux-x64/test-commit/bin/code-server"
 env -i HOME="$H" TERM=dumb PATH="$MOCKS:/usr/local/bin:/usr/bin:/bin" \
@@ -242,7 +242,7 @@ else
 fi
 
 # ── summary ──────────────────────────────────────────────────────────────────
-pkill -f "vscode-setup.sh" 2>/dev/null
+pkill -f "$ROOT/vscode-setup.sh" 2>/dev/null
 echo
 echo "════════════════════════════════════"
 echo "PASS: $PASS   FAIL: $FAIL"

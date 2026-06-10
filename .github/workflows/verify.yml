@@ -1,0 +1,16 @@
+name: verify
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sandbox test suite (simulated codespace flow)
+        run: bash test/run-tests.sh
+      - name: Real end-to-end (real VS Code server + real marketplace + real CLI installer)
+        run: bash test/e2e-real.sh

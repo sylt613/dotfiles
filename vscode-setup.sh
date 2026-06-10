@@ -41,6 +41,12 @@ POLL="${DOTFILES_VSCODE_POLL:-10}"
 
 echo "── vscode-setup start $(date '+%F %T') (wait up to ${WAIT}s)"
 
+# VS Code's bundled Node ignores the system CA store; trust it explicitly so
+# marketplace TLS works behind corporate/MITM proxies (harmless elsewhere).
+if [ -z "${NODE_EXTRA_CA_CERTS:-}" ] && [ -f /etc/ssl/certs/ca-certificates.crt ]; then
+    export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
+fi
+
 ext_dir() {
     # Codespaces server keeps extensions in ~/.vscode-remote/extensions;
     # plain dev containers / SSH use ~/.vscode-server/extensions.
@@ -80,12 +86,12 @@ has_claude_ext() {  # "$@" = list command prefix
 }
 
 install_all() {  # "$@" = install command prefix
-    local e
+    local e out
     for e in "${EXTENSIONS[@]}"; do
-        if "$@" --install-extension "$e" --force >/dev/null 2>&1; then
+        if out=$("$@" --install-extension "$e" --force 2>&1); then
             echo "  ✅ $e"
         else
-            echo "  ⚠️ $e install failed"
+            echo "  ⚠️ $e install failed: $(printf '%s' "$out" | tail -1)"
         fi
     done
 }
