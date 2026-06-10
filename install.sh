@@ -44,32 +44,47 @@ echo "⚙️  Claude settings (bypassPermissions, onboarding)..."
 mkdir -p "$HOME/.claude"
 SETTINGS="$HOME/.claude/settings.json"
 [ -f "$SETTINGS" ] || echo '{}' > "$SETTINGS"
-CLAUDE_SETTINGS_FILE="$SETTINGS" python3 <<'PY' || echo "  ⚠️ could not write settings.json"
-import json, os
+CLAUDE_SETTINGS_FILE="$SETTINGS" python3 <<'PY' || echo "  ⚠️ settings.json not valid JSON — LEFT UNTOUCHED (fix or delete it, then rerun)"
+import json, os, sys
 p = os.environ["CLAUDE_SETTINGS_FILE"]
 try:
     cfg = json.load(open(p))
 except Exception:
+    # Never clobber an unparseable non-trivial file (mid-write/hand-edited).
+    if os.path.getsize(p) > 2:
+        sys.exit(3)
     cfg = {}
 perms = cfg.get("permissions", {})
 perms["defaultMode"] = "bypassPermissions"
 cfg["permissions"] = perms
-json.dump(cfg, open(p, "w"), indent=2)
+tmp = p + ".tmp." + str(os.getpid())
+with open(tmp, "w") as f:
+    json.dump(cfg, f, indent=2)
+os.chmod(tmp, 0o600)
+os.replace(tmp, p)
 print("  ✅ permissions.defaultMode = bypassPermissions")
 PY
 
 # ~/.claude.json: skip the theme/login onboarding and the bypass-mode
 # confirmation dialog so the very first launch goes straight to a prompt.
-CLAUDE_STATE_FILE="$HOME/.claude.json" python3 <<'PY' || echo "  ⚠️ could not write ~/.claude.json"
-import json, os
+# This file is Claude's live state (login account, project trust, history) —
+# merge only, write atomically, and never touch it if it doesn't parse.
+CLAUDE_STATE_FILE="$HOME/.claude.json" python3 <<'PY' || echo "  ⚠️ ~/.claude.json not valid JSON — LEFT UNTOUCHED (Claude state preserved)"
+import json, os, sys
 p = os.environ["CLAUDE_STATE_FILE"]
 try:
-    cfg = json.load(open(p))
+    cfg = json.load(open(p)) if os.path.exists(p) else {}
 except Exception:
+    if os.path.getsize(p) > 2:
+        sys.exit(3)
     cfg = {}
 cfg["hasCompletedOnboarding"] = True
 cfg["bypassPermissionsModeAccepted"] = True
-json.dump(cfg, open(p, "w"), indent=2)
+tmp = p + ".tmp." + str(os.getpid())
+with open(tmp, "w") as f:
+    json.dump(cfg, f, indent=2)
+os.chmod(tmp, 0o600)
+os.replace(tmp, p)
 print("  ✅ onboarding + bypass-mode confirmation pre-accepted")
 PY
 
@@ -85,13 +100,15 @@ fi
 if [ -n "$SD" ]; then
     mkdir -p "$SD"
     [ -f "$SD/settings.json" ] || echo '{}' > "$SD/settings.json"
-    SETTINGS_FILE="$SD/settings.json" python3 <<'PY' || echo "  ⚠️ provider config failed"
-import json, os
+    SETTINGS_FILE="$SD/settings.json" python3 <<'PY' || echo "  ⚠️ Machine settings.json not valid JSON — LEFT UNTOUCHED"
+import json, os, sys
 p = os.environ["SETTINGS_FILE"]
 try:
     cfg = json.load(open(p))
 except Exception:
-    cfg = {}  # tolerate JSONC/garbage: rebuild machine settings
+    if os.path.getsize(p) > 2:
+        sys.exit(3)
+    cfg = {}
 pro = []
 fw = os.environ.get("FIREWORKS_API_KEY", "")
 if fw:
@@ -107,7 +124,11 @@ if an:
                 "models": [{"id": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4", "maxInputTokens": 200000, "maxOutputTokens": 8192, "supportsToolCalling": True}]})
 if pro:
     cfg["openai-compat-provider.providers"] = pro
-    json.dump(cfg, open(p, "w"), indent=4)
+    tmp = p + ".tmp." + str(os.getpid())
+    with open(tmp, "w") as f:
+        json.dump(cfg, f, indent=4)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, p)
     print(f"  ✅ {len(pro)} provider(s) written to Machine settings")
 else:
     print("  ℹ️ no provider API keys found")

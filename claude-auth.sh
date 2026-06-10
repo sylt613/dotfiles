@@ -58,27 +58,46 @@ fi
 # ── Long-lived OAuth token (from `claude setup-token`) ───────────────────────
 # Written into ~/.claude/settings.json "env" so BOTH the CLI and the VS Code
 # extension pick it up, regardless of how their processes inherit environment.
+# Skipped when a valid credentials file exists: credentials carry a refresh
+# token and must not be shadowed by a possibly-stale static token.
 if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    if [ -f "$CRED" ] && cred_valid "$CRED"; then
+        echo "  ✅ credentials file present — using it; OAuth token stays env-only (not pinned)"
+        configured=1
+    else
     SETTINGS="$CLAUDE_DIR/settings.json"
     [ -f "$SETTINGS" ] || echo '{}' > "$SETTINGS"
-    if CLAUDE_SETTINGS_FILE="$SETTINGS" python3 <<'PY'
-import json, os
+    CLAUDE_SETTINGS_FILE="$SETTINGS" python3 <<'PY'
+import json, os, sys
 p = os.environ["CLAUDE_SETTINGS_FILE"]
 try:
     cfg = json.load(open(p))
 except Exception:
+    # Never clobber a non-trivial file we can't parse (could be mid-write
+    # by a running Claude, or hand-edited) — leave it untouched.
+    if os.path.getsize(p) > 2:
+        sys.exit(3)
     cfg = {}
 env = cfg.get("env", {})
 env["CLAUDE_CODE_OAUTH_TOKEN"] = os.environ["CLAUDE_CODE_OAUTH_TOKEN"]
 cfg["env"] = env
-json.dump(cfg, open(p, "w"), indent=2)
+tmp = p + ".tmp." + str(os.getpid())
+with open(tmp, "w") as f:
+    json.dump(cfg, f, indent=2)
+os.chmod(tmp, 0o600)
+os.replace(tmp, p)
 PY
-    then
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
         chmod 600 "$SETTINGS"
         echo "  ✅ CLAUDE_CODE_OAUTH_TOKEN wired into ~/.claude/settings.json env (CLI + extension)"
         configured=1
+    elif [ "$rc" -eq 3 ]; then
+        echo "  ⚠️ ~/.claude/settings.json is not valid JSON — left untouched; token available via env only"
+        configured=1
     else
         echo "  ⚠️ failed to write OAuth token into ~/.claude/settings.json"
+    fi
     fi
 fi
 

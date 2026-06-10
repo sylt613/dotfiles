@@ -16,6 +16,8 @@ assert_file()  { [ -f "$1" ] && ok "file exists: ${1#"$HOME"/}" || bad "missing 
 assert_dir()   { [ -d "$1" ] && ok "dir exists: ${1#"$HOME"/}" || bad "missing dir: $1"; }
 assert_nofile(){ [ ! -f "$1" ] && ok "absent as expected: ${1#"$HOME"/}" || bad "should not exist: $1"; }
 assert_grep()  { grep -q "$2" "$1" 2>/dev/null && ok "$3" || bad "$3 — pattern '$2' not in $1"; }
+assert_nogrep(){ if grep -q "$2" "$1" 2>/dev/null; then bad "$3 — pattern '$2' FOUND in $1"; else ok "$3"; fi; }
+assert_same()  { cmp -s "$1" "$2" && ok "$3" || bad "$3 — files differ"; }
 assert_mode()  { [ "$(stat -c %a "$1" 2>/dev/null)" = "$2" ] && ok "perms $2 on ${1#"$HOME"/}" || bad "perms on $1 = $(stat -c %a "$1" 2>/dev/null), want $2"; }
 
 wait_for_file() { # path seconds
@@ -224,7 +226,12 @@ fi
 # ── 7. session-init self-heal (secret appears after creation) ────────────────
 CURRENT="session-init-heal"
 say "▶ $CURRENT"
-pkill -f "$ROOT/vscode-setup.sh" 2>/dev/null; sleep 1   # clear any lingering watchers so pgrep guard can't misfire
+# clear lingering watchers so session-init's pgrep guard can't misfire
+i=0
+while pgrep -f "$ROOT/vscode-setup.sh" >/dev/null 2>&1 && [ "$i" -lt 10 ]; do
+    pkill -f "$ROOT/vscode-setup.sh" 2>/dev/null
+    sleep 1; i=$((i+1))
+done
 new_sandbox
 make_code_server "$VSROOT/bin/linux-x64/test-commit/bin/code-server"
 env -i HOME="$H" TERM=dumb PATH="$MOCKS:/usr/local/bin:/usr/bin:/bin" \
@@ -240,6 +247,30 @@ if wait_for_file "$H/.dotfiles-state/extensions-ok" 15; then
 else
     bad "session-init did not get extension installed"
 fi
+
+# ── 8. corrupt existing state must NEVER be clobbered ────────────────────────
+CURRENT="corrupt-state-preserved"
+say "▶ $CURRENT"
+new_sandbox
+mkdir -p "$H/.claude"
+printf '{"oauthAccount": {"email": "user@example.com", "trunc' > "$H/.claude.json"
+printf '{"permissions": {"defaultMode": "bypassPermissions", ' > "$H/.claude/settings.json"
+cp "$H/.claude.json" "$SB/claude.json.orig"
+cp "$H/.claude/settings.json" "$SB/settings.json.orig"
+TEST_WAIT=3 run_install CLAUDE_CODE_OAUTH_TOKEN="tok" \
+    && ok "exit 0 despite corrupt state files" || bad "install failed on corrupt state"
+assert_same "$H/.claude.json" "$SB/claude.json.orig" "~/.claude.json left byte-identical"
+assert_same "$H/.claude/settings.json" "$SB/settings.json.orig" "settings.json left byte-identical"
+assert_grep "$H/.dotfiles-install.log" "LEFT UNTOUCHED" "non-clobber warning logged"
+
+# ── 9. creds + token together: creds win, token NOT pinned into settings ─────
+CURRENT="creds-and-token"
+say "▶ $CURRENT"
+new_sandbox
+TEST_WAIT=3 run_install CLAUDE_CREDENTIALS_JSON="$CREDS_JSON" CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-STALE"
+assert_grep "$H/.claude/.credentials.json" "sk-ant-oat01-TESTTOKEN" "credentials file seeded"
+assert_nogrep "$H/.claude/settings.json" "sk-ant-oat01-STALE" "static token NOT pinned over refreshable creds"
+assert_file "$H/.dotfiles-state/auth-configured"
 
 # ── summary ──────────────────────────────────────────────────────────────────
 pkill -f "$ROOT/vscode-setup.sh" 2>/dev/null

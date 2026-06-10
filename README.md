@@ -77,6 +77,17 @@ and anything written into a prebuild snapshot is stored and shared — never
 bake tokens in. Login, auto-mode, and keep-alive stay with these dotfiles
 (they run at create time and compose fine with prebuilds).
 
+## Recovery (if a codespace's Claude config ever breaks)
+
+Rebuilding a codespace wipes `$HOME` (GitHub behavior) — config comes back
+only if dotfiles run again. To restore by hand inside a codespace:
+
+```bash
+cp ~/.claude.json.backup ~/.claude.json    # Claude keeps this backup itself
+bash /workspaces/.codespaces/.persistedshare/dotfiles/install.sh   # re-run setup
+ai-check                                   # confirm
+```
+
 ## Troubleshooting
 
 - `~/.dotfiles-install.log` — main setup log
