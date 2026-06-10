@@ -1,190 +1,176 @@
 #!/bin/bash
-set -e
-echo "🚀 AI Coding Environment Setup"
+# Codespaces dotfiles bootstrap — Claude Code CLI + VS Code extension,
+# auto-login from Codespaces secrets, full-auto permission mode, provider
+# config, git/gh wiring, smart keep-alive.
+#
+# GitHub runs this once when a codespace is CREATED (and again on container
+# rebuilds). It must never die halfway: no `set -e`, every step is
+# best-effort, everything is logged to ~/.dotfiles-install.log (also visible
+# in /workspaces/.codespaces/.persistedshare/creation.log).
 
-# Extensions
-echo "🧩 Installing extensions..."
-for ext in "wienans.opencode-zen-chat-provider" "calgan.oai-provider" "github.vscode-pull-request-github" "ms-python.python" "anthropic.claude-code"; do
-    code --install-extension "$ext" --force 2>/dev/null && echo "  ✅ $ext" || echo "  ⚠️ $ext"
-done
+DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+LOG_FILE="$HOME/.dotfiles-install.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
 
-# OAIProvider config
-echo "🔑 Configuring OAIProvider..."
-for d in "${HOME}/.vscode-remote/data/Machine" "${HOME}/.vscode-server/data/Machine"; do
-    [ -d "$d" ] && { SD="$d"; break; }
-done
-
-if [ -n "${SD}" ]; then
-    SF="${SD}/settings.json"
-    mkdir -p "${SD}"
-    [ ! -f "$SF" ] && echo '{}' > "$SF"
-    export SETTINGS_FILE="$SF"
-
-    python3 << 'INNERPY'
-import json, os
-s = os.environ.get("SETTINGS_FILE","")
-if not s or not os.path.exists(s): exit(0)
-with open(s,"r") as f: cfg = json.load(f)
-pro = []
-fw = os.environ.get("FIREWORKS_API_KEY","")
-if fw: pro.append({"id":"kimi","displayName":"kimi","baseUrl":"https://api.fireworks.ai/inference/v1","apiKey":fw,"models":[{"id":"accounts/fireworks/models/kimi-k2p6","name":"kimi2.6","maxInputTokens":500000,"maxOutputTokens":4096,"supportsToolCalling":True},{"maxInputTokens":128000,"maxOutputTokens":4096,"supportsToolCalling":True},{"maxInputTokens":128000,"maxOutputTokens":4096,"supportsToolCalling":True},{"maxInputTokens":128000,"maxOutputTokens":4096,"supportsToolCalling":True}]})
-oa = os.environ.get("OPENAI_API_KEY","")
-if oa: pro.append({"id":"openai","displayName":"OpenAI","baseUrl":"https://api.openai.com/v1","apiKey":oa,"models":[{"id":"gpt-4o","name":"GPT-4o","maxInputTokens":128000,"maxOutputTokens":16384,"supportsToolCalling":True}]})
-an = os.environ.get("ANTHROPIC_API_KEY","")
-if an: pro.append({"id":"anthropic","displayName":"Anthropic","baseUrl":"https://api.anthropic.com/v1","apiKey":an,"models":[{"id":"claude-sonnet-4-20250514","name":"Claude Sonnet 4","maxInputTokens":200000,"maxOutputTokens":8192,"supportsToolCalling":True}]})
-if pro:
-    cfg["openai-compat-provider.providers"] = pro
-    with open(s,"w") as f: json.dump(cfg,f,indent=4)
-    print(f"  ✅ {len(pro)} provider(s)")
-else:
-    print("  ℹ️ No keys found")
-INNERPY
-else
-    echo "  ⚠️ VS Code not ready, skipping provider config"
-fi
+echo "🚀 AI Coding Environment Setup — $(date '+%F %T') (dotfiles: $DOTFILES_DIR)"
+chmod +x "$DOTFILES_DIR"/*.sh "$DOTFILES_DIR/ai-check" 2>/dev/null
+mkdir -p "$HOME/.dotfiles-state" "$HOME/.local/bin"
+export PATH="$HOME/.local/bin:$PATH"
 
 # ── Claude Code CLI ──────────────────────────────────────────────────────────
-echo "🤖 Setting up Claude Code CLI..."
-
-# Ensure Node.js is available
-if ! command -v node &>/dev/null; then
-    echo "  📦 Installing Node.js..."
-    curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - >/dev/null 2>&1
-    sudo apt-get install -y nodejs >/dev/null 2>&1
-fi
-
-# Install Claude Code globally
-if ! command -v claude &>/dev/null; then
-    npm install -g @anthropic-ai/claude-code >/dev/null 2>&1 && echo "  ✅ claude installed" || echo "  ⚠️ claude install failed"
-else
-    echo "  ✅ claude already installed ($(claude --version 2>/dev/null | head -1))"
-fi
-
-# ── Write credentials.json from CLAUDE_CREDENTIALS_JSON (has refresh token) ──
-if [ -n "${CLAUDE_CREDENTIALS_JSON:-}" ]; then
-    echo "  🔑 Seeding ~/.claude/.credentials.json from CLAUDE_CREDENTIALS_JSON..."
-    mkdir -p "${HOME}/.claude"
-    CRED_DST="${HOME}/.claude/.credentials.json"
-    printf '%s' "$CLAUDE_CREDENTIALS_JSON" | base64 -d > /tmp/.cred_seed.json 2>/dev/null || true
-    if python3 -c "import json; json.load(open('/tmp/.cred_seed.json'))['claudeAiOauth']" 2>/dev/null; then
-        seed_exp=$(python3 -c "import json; print(json.load(open('/tmp/.cred_seed.json'))['claudeAiOauth'].get('expiresAt',0))" 2>/dev/null || echo 0)
-        cur_exp=0
-        if [ -f "$CRED_DST" ]; then
-            cur_exp=$(python3 -c "import json; print(json.load(open('$CRED_DST'))['claudeAiOauth'].get('expiresAt',0))" 2>/dev/null || echo 0)
-        fi
-        if [ ! -f "$CRED_DST" ] || [ "${seed_exp:-0}" -gt "${cur_exp:-0}" ]; then
-            cp /tmp/.cred_seed.json "$CRED_DST"
-            chmod 600 "$CRED_DST"
-            echo "  ✅ credentials.json written (with refresh token)"
-        else
-            echo "  ✅ credentials.json kept (live copy is newer)"
-        fi
-    else
-        echo "  ⚠️ CLAUDE_CREDENTIALS_JSON is not valid JSON — skipping"
+echo "🤖 Claude Code CLI..."
+if ! command -v claude >/dev/null 2>&1; then
+    # Native installer first (fast, self-updating), npm as fallback.
+    timeout 240 bash -c 'curl -fsSL https://claude.ai/install.sh | bash' >/dev/null 2>&1
+    if ! command -v claude >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+        timeout 300 npm install -g @anthropic-ai/claude-code >/dev/null 2>&1
     fi
-    rm -f /tmp/.cred_seed.json
-elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
-    echo "  ✅ OAuth token present via CLAUDE_CODE_OAUTH_TOKEN (no refresh token)"
+fi
+if command -v claude >/dev/null 2>&1; then
+    echo "  ✅ claude installed ($(claude --version 2>/dev/null | head -1))"
 else
-    echo "  ⚠️ No Claude auth found — add CLAUDE_CODE_OAUTH_TOKEN to github.com/settings/codespaces"
+    echo "  ⚠️ claude CLI install failed (the VS Code extension ships its own copy, so chat still works)"
 fi
 
-# Configure Claude Code to run all commands without permission prompts
-echo "  ⚙️  Configuring auto-approve (bypassPermissions)..."
-mkdir -p "${HOME}/.claude"
-CLAUDE_SETTINGS="${HOME}/.claude/settings.json"
-[ ! -f "$CLAUDE_SETTINGS" ] && echo '{}' > "$CLAUDE_SETTINGS"
-export CLAUDE_SETTINGS
-python3 << 'CLAUDEPY'
+# ── Auth from Codespaces secrets ─────────────────────────────────────────────
+echo "🔑 Claude auth..."
+bash "$DOTFILES_DIR/claude-auth.sh"
+if [ -n "${ANTHROPIC_API_KEY:-}" ] && { [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || [ -n "${CLAUDE_CREDENTIALS_JSON:-}" ]; }; then
+    echo "  ℹ️ ANTHROPIC_API_KEY is also set — if Claude asks about it, decline to keep subscription billing"
+fi
+
+# ── Full-auto permission mode + skip first-run prompts ───────────────────────
+echo "⚙️  Claude settings (bypassPermissions, onboarding)..."
+mkdir -p "$HOME/.claude"
+SETTINGS="$HOME/.claude/settings.json"
+[ -f "$SETTINGS" ] || echo '{}' > "$SETTINGS"
+CLAUDE_SETTINGS_FILE="$SETTINGS" python3 <<'PY' || echo "  ⚠️ could not write settings.json"
 import json, os
-p = os.environ["CLAUDE_SETTINGS"]
-with open(p) as f:
-    try: cfg = json.load(f)
-    except: cfg = {}
+p = os.environ["CLAUDE_SETTINGS_FILE"]
+try:
+    cfg = json.load(open(p))
+except Exception:
+    cfg = {}
 perms = cfg.get("permissions", {})
 perms["defaultMode"] = "bypassPermissions"
 cfg["permissions"] = perms
-cfg.setdefault("theme", "auto")
-with open(p, "w") as f:
-    json.dump(cfg, f, indent=2)
-print("  ✅ All commands auto-approved")
-CLAUDEPY
+json.dump(cfg, open(p, "w"), indent=2)
+print("  ✅ permissions.defaultMode = bypassPermissions")
+PY
 
-# ── Prevent codespace from stopping mid-Claude-session ───────────────────────
-echo "⏰ Configuring smart keep-alive..."
+# ~/.claude.json: skip the theme/login onboarding and the bypass-mode
+# confirmation dialog so the very first launch goes straight to a prompt.
+CLAUDE_STATE_FILE="$HOME/.claude.json" python3 <<'PY' || echo "  ⚠️ could not write ~/.claude.json"
+import json, os
+p = os.environ["CLAUDE_STATE_FILE"]
+try:
+    cfg = json.load(open(p))
+except Exception:
+    cfg = {}
+cfg["hasCompletedOnboarding"] = True
+cfg["bypassPermissionsModeAccepted"] = True
+json.dump(cfg, open(p, "w"), indent=2)
+print("  ✅ onboarding + bypass-mode confirmation pre-accepted")
+PY
 
-# 1) Keep the default 15-min idle timeout (saves money when not working).
-#    The pinger below only fires when Claude is actually running, so idle
-#    codespaces still stop on schedule.
-if [ -n "${CODESPACE_NAME:-}" ]; then
-    gh api --method PATCH "/user/codespaces/$CODESPACE_NAME" \
-        -f idle_timeout_minutes=15 >/dev/null 2>&1 && \
-        echo "  ✅ Idle timeout set to 15 min (stops fast when idle)" || \
-        echo "  ⚠️ Could not set idle timeout via API"
-fi
-
-# 2) Smart keep-alive: adjusts the codespace idle timeout dynamically.
-#    Claude writes to .jsonl session files while processing; idle prompt = no writes.
-#    Active Claude → set timeout to 240 min (won't be killed mid-task).
-#    Idle/stopped Claude → set timeout back to 15 min (stops fast, saves money).
-#    Requires GH_CODESPACE_PAT secret (full-scope PAT) — built-in GITHUB_TOKEN
-#    lacks codespace scope so can't call the Codespaces API.
-if [ -n "${CODESPACE_NAME:-}" ] && [ -n "${GH_CODESPACE_PAT:-}" ]; then
-    cat > /tmp/.cs_keepalive.sh << 'KEEPALIVE'
-#!/bin/bash
-CURRENT_TIMEOUT=15
-while true; do
-    MARKER=$(mktemp /tmp/.cs_mark.XXXXXX)
-    sleep 120
-    WROTE=$(find ~/.claude/projects ~/.claude/sessions \
-        -newer "$MARKER" -name "*.jsonl" 2>/dev/null | head -1)
-    rm -f "$MARKER"
-    if [ -n "$WROTE" ]; then
-        # Claude is actively working — extend timeout to 240 min
-        if [ "$CURRENT_TIMEOUT" != "240" ]; then
-            curl -s -o /dev/null -X PATCH \
-                -H "Authorization: Bearer $GH_CODESPACE_PAT" \
-                -H "Accept: application/vnd.github+json" \
-                -H "Content-Type: application/json" \
-                "https://api.github.com/user/codespaces/$CODESPACE_NAME" \
-                -d '{"idle_timeout_minutes":240}' && CURRENT_TIMEOUT=240
-        fi
-    else
-        # Claude is idle — restore 15-min timeout so codespace stops on schedule
-        if [ "$CURRENT_TIMEOUT" != "15" ]; then
-            curl -s -o /dev/null -X PATCH \
-                -H "Authorization: Bearer $GH_CODESPACE_PAT" \
-                -H "Accept: application/vnd.github+json" \
-                -H "Content-Type: application/json" \
-                "https://api.github.com/user/codespaces/$CODESPACE_NAME" \
-                -d '{"idle_timeout_minutes":15}' && CURRENT_TIMEOUT=15
-        fi
-    fi
-done
-KEEPALIVE
-    chmod +x /tmp/.cs_keepalive.sh
-    pkill -f cs_keepalive 2>/dev/null || true  # kill stale instance from previous start
-    nohup /tmp/.cs_keepalive.sh >>/tmp/.cs_keepalive.log 2>&1 &
-    echo "  ✅ Smart keep-alive started (dynamic timeout: 240min active / 30min idle)"
+# ── OAIProvider config (Machine settings — pre-created, server reads on boot) ─
+echo "🔌 Provider config..."
+if [ -d "${DOTFILES_VSCODE_ROOT:-/vscode}" ] || [ -d "$HOME/.vscode-remote" ] || [ -n "${CODESPACES:-}" ]; then
+    SD="$HOME/.vscode-remote/data/Machine"
+elif [ -d "$HOME/.vscode-server" ]; then
+    SD="$HOME/.vscode-server/data/Machine"
 else
-    echo "  ⚠️ GH_CODESPACE_PAT not set — keep-alive inactive (add it at github.com/settings/codespaces)"
+    SD=""
+fi
+if [ -n "$SD" ]; then
+    mkdir -p "$SD"
+    [ -f "$SD/settings.json" ] || echo '{}' > "$SD/settings.json"
+    SETTINGS_FILE="$SD/settings.json" python3 <<'PY' || echo "  ⚠️ provider config failed"
+import json, os
+p = os.environ["SETTINGS_FILE"]
+try:
+    cfg = json.load(open(p))
+except Exception:
+    cfg = {}  # tolerate JSONC/garbage: rebuild machine settings
+pro = []
+fw = os.environ.get("FIREWORKS_API_KEY", "")
+if fw:
+    pro.append({"id": "kimi", "displayName": "kimi", "baseUrl": "https://api.fireworks.ai/inference/v1", "apiKey": fw,
+                "models": [{"id": "accounts/fireworks/models/kimi-k2p6", "name": "kimi2.6", "maxInputTokens": 500000, "maxOutputTokens": 4096, "supportsToolCalling": True}]})
+oa = os.environ.get("OPENAI_API_KEY", "")
+if oa:
+    pro.append({"id": "openai", "displayName": "OpenAI", "baseUrl": "https://api.openai.com/v1", "apiKey": oa,
+                "models": [{"id": "gpt-4o", "name": "GPT-4o", "maxInputTokens": 128000, "maxOutputTokens": 16384, "supportsToolCalling": True}]})
+an = os.environ.get("ANTHROPIC_API_KEY", "")
+if an:
+    pro.append({"id": "anthropic", "displayName": "Anthropic", "baseUrl": "https://api.anthropic.com/v1", "apiKey": an,
+                "models": [{"id": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4", "maxInputTokens": 200000, "maxOutputTokens": 8192, "supportsToolCalling": True}]})
+if pro:
+    cfg["openai-compat-provider.providers"] = pro
+    json.dump(cfg, open(p, "w"), indent=4)
+    print(f"  ✅ {len(pro)} provider(s) written to Machine settings")
+else:
+    print("  ℹ️ no provider API keys found")
+PY
+else
+    echo "  ℹ️ not a codespace/devcontainer — skipping Machine settings"
 fi
 
-# ── Wire up git and gh CLI with full-scope GitHub PAT ────────────────────────
-echo "🔗 Configuring git and gh CLI..."
+# ── VS Code extensions (background — server doesn't exist yet at this point) ─
+echo "🧩 VS Code extensions: launching background installer (log: ~/.dotfiles-vscode-setup.log)"
+( nohup bash "$DOTFILES_DIR/vscode-setup.sh" >/dev/null 2>&1 & ) 2>/dev/null
+
+# ── Idle timeout + smart keep-alive ──────────────────────────────────────────
+echo "⏰ Keep-alive..."
+if [ -n "${CODESPACE_NAME:-}" ] && [ -n "${GH_CODESPACE_PAT:-}" ]; then
+    curl -s -o /dev/null -X PATCH \
+        -H "Authorization: Bearer $GH_CODESPACE_PAT" \
+        -H "Accept: application/vnd.github+json" \
+        -H "Content-Type: application/json" \
+        "https://api.github.com/user/codespaces/$CODESPACE_NAME" \
+        -d '{"idle_timeout_minutes":15}' \
+        && echo "  ✅ idle timeout baseline set to 15 min" \
+        || echo "  ⚠️ could not set idle timeout"
+    ( nohup bash "$DOTFILES_DIR/cs_keepalive.sh" >>/tmp/.cs_keepalive.log 2>&1 & ) 2>/dev/null
+    echo "  ✅ smart keep-alive started (240 min while Claude works / 15 min idle)"
+else
+    echo "  ▫️ GH_CODESPACE_PAT not set — keep-alive inactive (add it at github.com/settings/codespaces)"
+fi
+
+# ── git + gh CLI with full-scope PAT ─────────────────────────────────────────
+echo "🔗 git/gh..."
 if [ -n "${GH_CODESPACE_PAT:-}" ]; then
-    # gh CLI respects GH_TOKEN; prefer the full-scope PAT over the
-    # repo-scoped auto-injected GITHUB_TOKEN so private repos and all APIs work
-    grep -qxF 'export GH_TOKEN="$GH_CODESPACE_PAT"' ~/.bashrc 2>/dev/null || \
-        echo 'export GH_TOKEN="$GH_CODESPACE_PAT"' >> ~/.bashrc
-    # git credential store with full-scope PAT
     git config --global credential.helper store
     GIT_USER=$(GH_TOKEN="$GH_CODESPACE_PAT" gh api /user --jq '.login' 2>/dev/null || echo "sylt613")
-    printf 'https://%s:%s@github.com\n' "$GIT_USER" "$GH_CODESPACE_PAT" > ~/.git-credentials
-    chmod 600 ~/.git-credentials
-    echo "  ✅ git and gh CLI configured with full-scope PAT (user: $GIT_USER)"
+    printf 'https://%s:%s@github.com\n' "$GIT_USER" "$GH_CODESPACE_PAT" > "$HOME/.git-credentials"
+    chmod 600 "$HOME/.git-credentials"
+    echo "  ✅ git + gh wired with full-scope PAT (user: $GIT_USER)"
 else
-    echo "  ⚠️ GH_CODESPACE_PAT not set — git/gh will use repo-scoped token only"
+    echo "  ▫️ GH_CODESPACE_PAT not set — using repo-scoped default token"
 fi
 
-echo "✅ Done!"
+# ── Shell rc hook: PATH, GH_TOKEN, and per-shell self-healing ────────────────
+echo "🐚 Shell init hook..."
+write_rc_block() {
+    local f="$1"
+    [ -f "$f" ] || touch "$f"
+    sed -i '/# >>> ai-dotfiles >>>/,/# <<< ai-dotfiles <<</d' "$f" 2>/dev/null
+    cat >> "$f" <<EOF
+# >>> ai-dotfiles >>>
+export PATH="\$HOME/.local/bin:\$PATH"
+if [ -n "\${GH_CODESPACE_PAT:-}" ]; then export GH_TOKEN="\$GH_CODESPACE_PAT"; fi
+export AI_DOTFILES_DIR="$DOTFILES_DIR"
+if [ -f "\$AI_DOTFILES_DIR/session-init.sh" ]; then . "\$AI_DOTFILES_DIR/session-init.sh"; fi
+# <<< ai-dotfiles <<<
+EOF
+}
+write_rc_block "$HOME/.bashrc"
+[ -f "$HOME/.zshrc" ] && write_rc_block "$HOME/.zshrc"
+echo "  ✅ ~/.bashrc hook installed (re-seeds auth / extension / keep-alive on every shell)"
+
+# ── ai-check verifier ────────────────────────────────────────────────────────
+install -m 755 "$DOTFILES_DIR/ai-check" "$HOME/.local/bin/ai-check" 2>/dev/null \
+    && echo "🩺 Run 'ai-check' in any terminal to verify the setup"
+
+echo "✅ Done! ($(date '+%F %T'))"
+exit 0
