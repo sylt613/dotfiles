@@ -1,0 +1,105 @@
+# Claude Code Codespaces — Setup Instructions
+
+## What this does
+
+Every new GitHub Codespace you create will have:
+- **Claude Code VS Code extension** installed and logged in automatically
+- **Full-auto (bypassPermissions) mode** enabled — no permission prompts
+- Claude CLI installed and authenticated
+- Smart keep-alive (prevents idle timeout while Claude is working)
+- git/gh wired with your credentials
+
+---
+
+## One-time setup
+
+### 1. Enable dotfiles in GitHub Codespaces settings
+
+Go to [github.com/settings/codespaces](https://github.com/settings/codespaces):
+- Check **"Automatically install dotfiles"**
+- Select `sylt613/dotfiles` from the dropdown
+
+### 2. Get your Claude auth token
+
+On any machine where you're already logged into Claude Code, run:
+
+```bash
+claude setup-token
+```
+
+Copy the `sk-ant-oat01-…` value — that's your `CLAUDE_CODE_OAUTH_TOKEN`.
+
+### 3. Add the secrets in GitHub Codespaces settings
+
+Still on [github.com/settings/codespaces](https://github.com/settings/codespaces), add these secrets:
+
+| Secret | Required? | What to put in it |
+|---|---|---|
+| `CLAUDE_CODE_OAUTH_TOKEN` | **Yes** | The `sk-ant-oat01-…` value from `claude setup-token` |
+| `CLAUDE_CREDENTIALS_JSON` | Optional (backup) | Full credentials with refresh token: `base64 -w0 ~/.claude/.credentials.json` on a logged-in Linux machine |
+| `GH_CODESPACE_PAT` | Optional (recommended) | GitHub Personal Access Token (classic, `repo` + `codespace` scopes) — needed for keep-alive and git auth on private repos |
+| `FIREWORKS_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | Optional | For using additional models in the OAI-provider extension |
+
+> **Critical:** After adding each secret, click it and **grant access to every repository** you open Codespaces on. Secrets not granted to a repo are invisible to that codespace.
+
+### 4. Create a new codespace
+
+Secrets only take effect in codespaces created or restarted **after** they're added:
+- **New secret** → create a fresh codespace, or run *Codespaces: Rebuild Container*
+- **Changed/added secret on existing codespace** → restart the codespace
+
+---
+
+## Verify it worked
+
+Open a terminal in the new codespace and run:
+
+```bash
+ai-check
+```
+
+You'll see `✅ READY` or a plain-English explanation of exactly what's missing.
+
+---
+
+## Per-repo devcontainer (more reliable, works without the dotfiles toggle)
+
+For repos you use frequently, copy [`devcontainer-template/devcontainer.json`](devcontainer-template/devcontainer.json) to `<your-repo>/.devcontainer/devcontainer.json`. This makes GitHub install the extensions during codespace creation itself (instead of in the background after), and the full setup runs automatically even if the dotfiles toggle is off.
+
+To make codespaces start instantly: enable a **prebuild** (repo → Settings → Codespaces → *Set up prebuild*). Prebuilds bake the extensions in — login stays with the dotfiles secrets so tokens are never stored in the prebuild snapshot.
+
+---
+
+## Recovery (if a codespace's Claude config breaks)
+
+A codespace rebuild wipes `$HOME`. To restore by hand inside a running codespace:
+
+```bash
+# Re-run the full setup (re-seeds auth, re-enables bypassPermissions)
+bash ~/.ai-dotfiles/install.sh
+
+# Or if the dotfiles cloned to the persisted share:
+bash /workspaces/.codespaces/.persistedshare/dotfiles/install.sh
+
+# Confirm everything is working
+ai-check
+```
+
+If `~/.claude.json` was damaged and Claude lost its login state (check: `ai-check` reports auth missing after the above), Claude keeps a backup:
+
+```bash
+cp ~/.claude.json.backup ~/.claude.json
+```
+
+---
+
+## Troubleshooting
+
+| Symptom | Where to look |
+|---|---|
+| Extension not installed / auth missing | `cat ~/.dotfiles-install.log` |
+| Extension installed but wrong version | `cat ~/.dotfiles-vscode-setup.log` |
+| Secrets not visible in the codespace | `printenv \| grep -E 'CLAUDE\|GH_'` — empty means not granted to this repo, or needs a restart |
+| GitHub creation log | `/workspaces/.codespaces/.persistedshare/creation.log` |
+
+Still stuck? `ai-check` is the fastest diagnostic — it checks every piece and tells you exactly what's missing.
