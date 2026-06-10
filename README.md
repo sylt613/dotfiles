@@ -8,9 +8,16 @@ Claude CLI, provider config, git/gh auth, and a smart keep-alive.
 
 1. **Enable dotfiles**: [github.com/settings/codespaces](https://github.com/settings/codespaces)
    → check **"Automatically install dotfiles"** → select `sylt613/dotfiles`.
-2. **Add secrets** on the same page, and — *the #1 cause of "it didn't work"* —
-   click each secret and **grant it access to every repository** you open
-   codespaces on:
+2. **Add secrets** using the one-command script (run on your laptop, not inside a
+   codespace):
+
+   ```bash
+   git clone https://github.com/sylt613/dotfiles && cd dotfiles
+   bash setup-secrets.sh
+   ```
+
+   This uploads your Claude login and grants it to all your current repos.
+   Manual secret table for reference:
 
    | Secret | What | How to get it |
    |---|---|---|
@@ -18,6 +25,12 @@ Claude CLI, provider config, git/gh auth, and a smart keep-alive.
    | `CLAUDE_CREDENTIALS_JSON` | full credentials incl. refresh token (alternative/extra) | `base64 -w0 ~/.claude/.credentials.json` on a logged-in Linux machine (raw JSON also accepted) |
    | `GH_CODESPACE_PAT` | optional: full-scope PAT for keep-alive + git/gh on private repos | github.com/settings/tokens (classic, `repo` + `codespace` scopes) |
    | `FIREWORKS_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | optional: OAI-provider extension models | provider dashboards |
+
+   > **New repo?** GitHub user secrets can only be granted to specific repos (no
+   > "all repos" option for user secrets). Run this any time you create a new repo:
+   > ```bash
+   > bash setup-secrets.sh --grant
+   > ```
 
 3. Dotfiles only apply to codespaces **created after** this — create a fresh
    codespace (or run *Codespaces: Rebuild Container*) to pick up changes.

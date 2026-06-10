@@ -18,13 +18,20 @@ On your **own machine** (where you're logged into Claude Code and the
 
 ```bash
 git clone https://github.com/sylt613/dotfiles && cd dotfiles
-bash setup-secrets.sh sylt613/dotfiles sylt613/<your-repo> ...
+bash setup-secrets.sh
 ```
 
 It uploads your Claude login to your GitHub Codespaces user secrets and grants
-them to every repo you list — re-runnable any time you start using a new repo
-(it merges grants, never revokes). Then check the dotfiles toggle (step 1
-below) once, and you're done.
+them to **all your current repos** automatically. Then check the dotfiles toggle
+(step 1 below) once, and you're done.
+
+**When you create a new repo**, re-run:
+
+```bash
+bash setup-secrets.sh --grant
+```
+
+This updates the repo grants without re-prompting for secret values.
 
 ## Why can't this be 100% automatic?
 
@@ -39,6 +46,9 @@ bot, or GitHub Action can do them:
 3. **A GitHub Action can't write your account secrets** — the workflow token
    is repo-scoped; user Codespaces secrets need your personal `codespace`-scope
    auth (which is exactly what `setup-secrets.sh` uses via your local gh CLI).
+4. **GitHub user secrets have no "all repos" visibility** — unlike org secrets,
+   user Codespace secrets can only be `selected` repos. The `--grant` command
+   adds every current repo; run it again for new ones.
 
 Everything else *is* automatic — that's what these dotfiles do at codespace
 creation. And if a codespace of yours already auto-logged-in before, your
