@@ -69,8 +69,11 @@ Dotfiles are account-wide but install the extension *after* creation. For
 repos you use a lot, copy
 [`devcontainer-template/devcontainer.json`](devcontainer-template/devcontainer.json)
 to `<repo>/.devcontainer/devcontainer.json` — then **GitHub itself** installs
-the extensions during creation, and enabling a **prebuild** (repo → Settings →
-Codespaces → *Set up prebuild*) bakes them in so codespaces start instantly.
+the extensions during creation, and the template's `postCreateCommand` runs
+this repo's bootstrap directly, so the full setup (login, auto-mode,
+keep-alive) works **even if the dotfiles toggle is off**. Enabling a
+**prebuild** (repo → Settings → Codespaces → *Set up prebuild*) bakes the
+extensions in so codespaces start instantly.
 
 Prebuilds **cannot** handle login: user secrets don't exist at prebuild time,
 and anything written into a prebuild snapshot is stored and shared — never
