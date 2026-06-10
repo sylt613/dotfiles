@@ -3,12 +3,10 @@
 # any box where you're logged into Claude Code and the gh CLI) — NOT inside a
 # codespace:
 #
-#   bash setup-secrets.sh owner/repo1 [owner/repo2 ...]
+#   bash setup-secrets.sh
 #
-# It uploads your Claude login to your GitHub *user* Codespaces secrets and
-# grants them to every repo you list (merging with repos already granted, so
-# re-running never removes access). After this, codespaces on those repos log
-# in by themselves.
+# Uploads your Claude login to your GitHub Codespaces user secrets and grants
+# them to ALL your repositories automatically — no repo list needed.
 #
 # What it sets:
 #   CLAUDE_CREDENTIALS_JSON  if ~/.claude/.credentials.json exists locally
@@ -23,13 +21,6 @@
 
 set -u
 
-REPOS=("$@")
-if [ "${#REPOS[@]}" -eq 0 ]; then
-    echo "usage: bash setup-secrets.sh <owner/repo> [more repos ...]"
-    echo "   eg: bash setup-secrets.sh sylt613/dotfiles sylt613/myproject"
-    exit 1
-fi
-
 command -v gh >/dev/null 2>&1 || { echo "❌ gh CLI not installed → https://cli.github.com"; exit 1; }
 gh auth status >/dev/null 2>&1 || { echo "❌ gh not logged in — run: gh auth login"; exit 1; }
 
@@ -39,21 +30,11 @@ if ! gh auth status 2>&1 | grep -q "codespace"; then
     gh auth refresh -h github.com -s codespace || { echo "❌ could not get codespace scope"; exit 1; }
 fi
 
-# Merge the repos being granted with any already granted to the secret, so
-# re-running for a new repo never revokes the old ones.
-merged_repos() {  # $1 = secret name → comma-separated repo list on stdout
-    {
-        gh api "/user/codespaces/secrets/$1/repositories" \
-            --jq '.repositories[].full_name' 2>/dev/null
-        printf '%s\n' "${REPOS[@]}"
-    } | sort -u | grep . | tr '\n' ',' | sed 's/,$//'
-}
-
 set_secret() {  # $1 = name, value on stdin
-    local name="$1" repos
-    repos=$(merged_repos "$name")
-    if gh secret set "$name" --user --app codespaces --repos "$repos"; then
-        echo "  ✅ $name set + granted to: $repos"
+    local name="$1"
+    # --visibility all grants to every repo in the account automatically
+    if gh secret set "$name" --user --app codespaces --visibility all; then
+        echo "  ✅ $name set → granted to ALL repositories"
     else
         echo "  ❌ failed to set $name"
         return 1
@@ -86,8 +67,8 @@ else
 fi
 
 echo
-echo "📋 Your user Codespaces secrets now:"
-gh api /user/codespaces/secrets --jq '.secrets[].name' 2>/dev/null | sed 's/^/   • /'
+echo "📋 Your Codespaces secrets:"
+gh api /user/codespaces/secrets --jq '.secrets[] | "   • \(.name)  [\(.visibility)]"' 2>/dev/null
 echo
 echo "⚠️  Last manual step (no API exists for it): make sure"
 echo "   https://github.com/settings/codespaces has 'Automatically install"
