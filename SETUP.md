@@ -11,7 +11,41 @@ Every new GitHub Codespace you create will have:
 
 ---
 
-## One-time setup
+## Fastest path: one command
+
+On your **own machine** (where you're logged into Claude Code and the
+[gh CLI](https://cli.github.com)) — not inside a codespace:
+
+```bash
+git clone https://github.com/sylt613/dotfiles && cd dotfiles
+bash setup-secrets.sh sylt613/dotfiles sylt613/<your-repo> ...
+```
+
+It uploads your Claude login to your GitHub Codespaces user secrets and grants
+them to every repo you list — re-runnable any time you start using a new repo
+(it merges grants, never revokes). Then check the dotfiles toggle (step 1
+below) once, and you're done.
+
+## Why can't this be 100% automatic?
+
+Three things have no API and/or require *your* interactive login — no script,
+bot, or GitHub Action can do them:
+
+1. **The token itself** — `claude setup-token` (or the Claude login that
+   creates `~/.claude/.credentials.json`) requires you logging into claude.ai
+   in a browser. Nothing can mint it on your behalf.
+2. **The dotfiles toggle** — GitHub has no API for "Automatically install
+   dotfiles". One checkbox, once, at github.com/settings/codespaces.
+3. **A GitHub Action can't write your account secrets** — the workflow token
+   is repo-scoped; user Codespaces secrets need your personal `codespace`-scope
+   auth (which is exactly what `setup-secrets.sh` uses via your local gh CLI).
+
+Everything else *is* automatic — that's what these dotfiles do at codespace
+creation. And if a codespace of yours already auto-logged-in before, your
+secrets already exist: at most grant them to new repos (one re-run of
+`setup-secrets.sh`, or tick checkboxes in the web UI).
+
+## One-time setup (manual route — same result as the script)
 
 ### 1. Enable dotfiles in GitHub Codespaces settings
 
