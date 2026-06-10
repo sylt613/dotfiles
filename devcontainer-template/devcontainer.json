@@ -1,0 +1,26 @@
+// Drop this into <your-repo>/.devcontainer/devcontainer.json for the most
+// reliable extension setup — extensions listed here are installed by GitHub
+// itself during codespace creation (and baked into prebuilds, so they're
+// instant). Works together with the dotfiles: the dotfiles still handle
+// login, bypassPermissions mode, keep-alive, etc. at create time.
+//
+// Optionally enable prebuilds afterwards: repo → Settings → Codespaces →
+// "Set up prebuild". NOTE: never put tokens/secrets in here or in
+// onCreateCommand — prebuild snapshots are stored and shared.
+{
+    "name": "ai-dev",
+    "image": "mcr.microsoft.com/devcontainers/universal:2",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "anthropic.claude-code",
+                "github.vscode-pull-request-github",
+                "ms-python.python",
+                "wienans.opencode-zen-chat-provider",
+                "calgan.oai-provider"
+            ]
+        }
+    },
+    // Runs at prebuild time (no user secrets available here — by design).
+    "onCreateCommand": "npm install -g @anthropic-ai/claude-code || true"
+}

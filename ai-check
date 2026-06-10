@@ -1,0 +1,90 @@
+#!/bin/bash
+# Health check for the AI codespace setup. Run `ai-check` in any terminal to
+# verify Claude Code CLI, auth, permission mode, the VS Code extension, and
+# background services. Exits non-zero if something critical is missing.
+
+ok=0; bad=0
+pass() { echo "  ✅ $*"; ok=$((ok+1)); }
+fail() { echo "  ❌ $*"; bad=$((bad+1)); }
+warn() { echo "  ⚠️ $*"; }
+
+echo "── Claude Code CLI"
+if command -v claude >/dev/null 2>&1; then
+    pass "claude on PATH ($(claude --version 2>/dev/null | head -1))"
+else
+    fail "claude CLI not installed (check ~/.dotfiles-install.log)"
+fi
+
+echo "── Auth"
+auth=""
+CRED="$HOME/.claude/.credentials.json"
+if [ -f "$CRED" ]; then
+    info=$(python3 - "$CRED" 2>/dev/null <<'PY'
+import json, sys, time
+d = json.load(open(sys.argv[1])).get("claudeAiOauth", {})
+exp = d.get("expiresAt", 0)
+state = "no expiry recorded"
+if exp:
+    state = ("expires " if exp / 1000 > time.time() else "EXPIRED ") + time.strftime("%Y-%m-%d %H:%M", time.localtime(exp / 1000))
+print(f"{state}; refresh token: {'yes' if d.get('refreshToken') else 'NO'}")
+PY
+)
+    pass "credentials.json present (${info:-unreadable})"
+    auth=1
+fi
+if grep -q '"CLAUDE_CODE_OAUTH_TOKEN"' "$HOME/.claude/settings.json" 2>/dev/null; then
+    pass "OAuth token wired into ~/.claude/settings.json env"
+    auth=1
+fi
+if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    pass "CLAUDE_CODE_OAUTH_TOKEN present in environment"
+    auth=1
+fi
+if [ -z "$auth" ]; then
+    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+        warn "no OAuth auth; ANTHROPIC_API_KEY set — API-key billing would be used"
+    else
+        fail "no auth at all — extension will show a login screen"
+    fi
+fi
+
+echo "── Permission mode"
+mode=$(python3 -c 'import json; print(json.load(open("'"$HOME"'/.claude/settings.json")).get("permissions",{}).get("defaultMode",""))' 2>/dev/null)
+if [ "$mode" = "bypassPermissions" ]; then
+    pass "defaultMode=bypassPermissions (full auto)"
+elif [ -n "$mode" ]; then
+    warn "defaultMode=$mode"
+else
+    warn "no defaultMode set (will ask for permissions)"
+fi
+
+echo "── VS Code extension (anthropic.claude-code)"
+found=""
+for d in "$HOME"/.vscode-remote/extensions/anthropic.claude-code-* \
+         "$HOME"/.vscode-server/extensions/anthropic.claude-code-*; do
+    [ -e "$d" ] && { found="$d"; break; }
+done
+if [ -n "$found" ]; then
+    pass "installed: $(basename "$found")"
+elif pgrep -f vscode-setup.sh >/dev/null 2>&1; then
+    warn "not yet installed — installer is waiting for the VS Code server (log: ~/.dotfiles-vscode-setup.log)"
+else
+    fail "not installed and installer not running (log: ~/.dotfiles-vscode-setup.log)"
+fi
+
+echo "── Secrets visible in this codespace"
+for s in CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CREDENTIALS_JSON GH_CODESPACE_PAT FIREWORKS_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY; do
+    if [ -n "${!s}" ]; then echo "  ✅ $s"; else echo "  ▫️ $s (not set — add/grant at github.com/settings/codespaces)"; fi
+done
+
+echo "── Background services"
+pgrep -f cs_keepalive >/dev/null 2>&1 && echo "  ✅ keep-alive running" || echo "  ▫️ keep-alive not running (needs GH_CODESPACE_PAT)"
+
+echo
+if [ "$bad" -eq 0 ]; then
+    echo "✅ READY ($ok checks passed)"
+    exit 0
+else
+    echo "❌ NOT READY ($bad problem(s)) — see ~/.dotfiles-install.log and ~/.dotfiles-vscode-setup.log"
+    exit 1
+fi
