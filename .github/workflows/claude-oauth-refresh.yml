@@ -6,7 +6,6 @@ on:
   workflow_dispatch:          # manual trigger anytime
 
 env:
-  FLY_APP: vscode-cloud-sylt613
   CLIENT_ID: 9188040d-6c67-4c5b-b112-36a304b66dad
   TOKEN_URL: https://platform.claude.com/v1/oauth/token
 
@@ -16,7 +15,7 @@ jobs:
     timeout-minutes: 10
     steps:
 
-      # ── 1. Extract current refresh token from stored credentials ──────────
+      # ── 1. Extract refresh token from stored credentials ──────────────────
       - name: Extract refresh token
         id: extract
         env:
@@ -27,181 +26,114 @@ jobs:
           RT=$(printf '%s' "$CREDS" | python3 -c \
                "import sys,json; print(json.load(sys.stdin)['claudeAiOauth']['refreshToken'])")
           if [ -z "$RT" ] || [ "$RT" = "None" ]; then
-            echo "ERROR: no refresh token in CLAUDE_CREDENTIALS_JSON — run manual re-auth first"
+            echo "ERROR: no refresh token in CLAUDE_CREDENTIALS_JSON"
             exit 1
           fi
           echo "::add-mask::$RT"
           echo "refresh_token=$RT" >> "$GITHUB_OUTPUT"
 
-      # ── 2. Call token endpoint ────────────────────────────────────────────
+      # ── 2. Call Anthropic token endpoint ──────────────────────────────────
       - name: Refresh OAuth token
         id: oauth
         env:
           REFRESH_TOKEN: ${{ steps.extract.outputs.refresh_token }}
         run: |
-          RESP=$(curl -sS -X POST "$TOKEN_URL" \
+          RESP=$(curl -fsSL -X POST "$TOKEN_URL" \
             -H "Content-Type: application/x-www-form-urlencoded" \
             -H "anthropic-version: oauth-2025-04-20" \
             --data-urlencode "grant_type=refresh_token" \
             --data-urlencode "refresh_token=$REFRESH_TOKEN" \
             --data-urlencode "client_id=$CLIENT_ID")
 
-          ACCESS=$(printf '%s' "$RESP" | python3 -c \
-            "import sys,json; d=json.load(sys.stdin); print(d.get('access_token',''))")
-          NEW_RT=$(printf '%s' "$RESP" | python3 -c \
-            "import sys,json; d=json.load(sys.stdin); print(d.get('refresh_token',''))")
-          EXPIRES=$(printf '%s' "$RESP" | python3 -c \
-            "import sys,json; d=json.load(sys.stdin); print(d.get('expires_in', 2592000))")
+          ACCESS=$(printf '%s' "$RESP"  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('access_token',''))")
+          NEW_RT=$(printf '%s' "$RESP"  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('refresh_token',''))")
+          EXPIRES=$(printf '%s' "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('expires_in',2592000))")
 
-          if [ -z "$ACCESS" ] || [ "$ACCESS" = "None" ] || [ "$ACCESS" = "" ]; then
+          if [ -z "$ACCESS" ] || [ "$ACCESS" = "None" ]; then
             echo "OAuth refresh failed. Response: $RESP"
             exit 1
           fi
 
           echo "::add-mask::$ACCESS"
           [ -n "$NEW_RT" ] && echo "::add-mask::$NEW_RT"
+          echo "access_token=$ACCESS"                      >> "$GITHUB_OUTPUT"
+          echo "refresh_token=${NEW_RT:-$REFRESH_TOKEN}"  >> "$GITHUB_OUTPUT"
+          echo "expires_in=$EXPIRES"                      >> "$GITHUB_OUTPUT"
 
-          echo "access_token=$ACCESS" >> "$GITHUB_OUTPUT"
-          # Prefer rotated refresh token; fall back to existing one
-          echo "refresh_token=${NEW_RT:-$REFRESH_TOKEN}" >> "$GITHUB_OUTPUT"
-          echo "expires_in=$EXPIRES" >> "$GITHUB_OUTPUT"
-
-      # ── 3. Build updated credentials JSON ────────────────────────────────
+      # ── 3. Build updated credentials JSON using jq (no heredocs needed) ───
       - name: Build new credentials JSON
         id: build
         env:
           CLAUDE_CREDENTIALS_JSON: ${{ secrets.CLAUDE_CREDENTIALS_JSON }}
-          NEW_ACCESS: ${{ steps.oauth.outputs.access_token }}
+          NEW_ACCESS:  ${{ steps.oauth.outputs.access_token }}
           NEW_REFRESH: ${{ steps.oauth.outputs.refresh_token }}
-          EXPIRES_IN: ${{ steps.oauth.outputs.expires_in }}
+          EXPIRES_IN:  ${{ steps.oauth.outputs.expires_in }}
         run: |
-          NEW_CREDS=$(python3 - <<'PYEOF'
-import os, json, time, base64
+          CREDS=$(printf '%s' "$CLAUDE_CREDENTIALS_JSON" | base64 -d 2>/dev/null \
+                  || printf '%s' "$CLAUDE_CREDENTIALS_JSON")
+          EXPIRES_MS=$(( $(date +%s%3N) + EXPIRES_IN * 1000 ))
+          NEW_CREDS=$(printf '%s' "$CREDS" | jq \
+            --arg at "$NEW_ACCESS" \
+            --arg rt "$NEW_REFRESH" \
+            --argjson ea "$EXPIRES_MS" \
+            '.claudeAiOauth.accessToken=$at | .claudeAiOauth.refreshToken=$rt | .claudeAiOauth.expiresAt=$ea')
+          NEW_B64=$(printf '%s' "$NEW_CREDS" | base64 -w0)
+          echo "::add-mask::$NEW_B64"
+          echo "creds_b64=$NEW_B64" >> "$GITHUB_OUTPUT"
 
-raw_secret = os.environ["CLAUDE_CREDENTIALS_JSON"]
-try:
-    raw = base64.b64decode(raw_secret).decode()
-except Exception:
-    raw = raw_secret
-
-d = json.loads(raw)
-d["claudeAiOauth"]["accessToken"]  = os.environ["NEW_ACCESS"]
-d["claudeAiOauth"]["refreshToken"] = os.environ["NEW_REFRESH"]
-d["claudeAiOauth"]["expiresAt"]    = int((time.time() + int(os.environ["EXPIRES_IN"])) * 1000)
-print(json.dumps(d))
-PYEOF
-)
-          B64=$(printf '%s' "$NEW_CREDS" | base64 -w0)
-          echo "::add-mask::$B64"
-          echo "creds_b64=$B64" >> "$GITHUB_OUTPUT"
-
-      # ── 4. Update CLAUDE_CREDENTIALS_JSON Codespace user secret ─────────────
-      # Sets the USER-level Codespace secret (not a repo secret) so every new
-      # codespace gets the refreshed credentials. Also re-grants all repos since
-      # GitHub user secrets don't have "all repos" visibility.
+      # ── 4. Push refreshed credentials to the user Codespace secret ───────
+      # GitHub user secrets have no "all repos" visibility, so we set the
+      # value then separately grant every repo via the repositories API.
       - name: Update Codespace user secret + grant all repos
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT_SECRETS }}
+          GH_TOKEN:  ${{ secrets.GH_PAT_SECRETS }}
           CREDS_B64: ${{ steps.build.outputs.creds_b64 }}
         run: |
-          python3 - <<'PYEOF'
-import base64, json, os, subprocess
-from nacl.public import PublicKey, SealedBox
+          # Set the user-level Codespace secret
+          printf '%s' "$CREDS_B64" | base64 -d \
+            | gh secret set CLAUDE_CREDENTIALS_JSON --user --app codespaces
 
-gh_token = os.environ["GH_TOKEN"]
-creds_b64 = os.environ["CREDS_B64"]
-env = {**os.environ, "GH_TOKEN": gh_token}
+          # Keep the repo Actions copy in sync so step 1 has fresh creds next run
+          printf '%s' "$CREDS_B64" \
+            | gh secret set CLAUDE_CREDENTIALS_JSON --repo sylt613/dotfiles
 
-# Get public key for user Codespace secrets
-import urllib.request
-def gh_api(path, method="GET", body=None):
-    req = urllib.request.Request(
-        f"https://api.github.com{path}",
-        data=json.dumps(body).encode() if body else None,
-        method=method,
-        headers={"Authorization": f"Bearer {gh_token}", "Accept": "application/vnd.github+json",
-                 "Content-Type": "application/json", "X-GitHub-Api-Version": "2022-11-28"}
-    )
-    with urllib.request.urlopen(req) as r:
-        return r.status, (json.loads(r.read()) if r.status not in (204,) else {})
-
-_, key_info = gh_api("/user/codespaces/secrets/public-key")
-pub_key_bytes = base64.b64decode(key_info["key"])
-encrypted = base64.b64encode(SealedBox(PublicKey(pub_key_bytes)).encrypt(
-    base64.b64decode(creds_b64))).decode()
-
-# Update the user Codespace secret
-status, _ = gh_api("/user/codespaces/secrets/CLAUDE_CREDENTIALS_JSON", "PUT", {
-    "encrypted_value": encrypted, "key_id": key_info["key_id"]})
-print(f"Updated user Codespace secret CLAUDE_CREDENTIALS_JSON: HTTP {status}")
-
-# Get all repo IDs and grant them access
-r = subprocess.run(["gh", "api", "/user/repos", "--paginate", "--jq", "[.[].id]"],
-                   capture_output=True, text=True, env=env)
-repo_ids = []
-for line in r.stdout.strip().split("\n"):
-    try: repo_ids.extend(json.loads(line))
+          # Grant to every repo (user secrets have no "all repos" toggle)
+          REPO_IDS=$(gh api /user/repos --paginate --jq '[.[].id]' \
+            | python3 -c "
+import sys, json
+ids = []
+for line in sys.stdin:
+    try: ids.extend(json.loads(line.strip()))
     except: pass
-payload = json.dumps({"selected_repository_ids": repo_ids})
-r2 = subprocess.run(["gh", "api", "-X", "PUT",
-    "/user/codespaces/secrets/CLAUDE_CREDENTIALS_JSON/repositories", "--input", "-"],
-    input=payload.encode(), capture_output=True, env=env)
-print(f"Granted to {len(repo_ids)} repos: {'ok' if r2.returncode == 0 else r2.stderr.decode()[:60]}")
+print(json.dumps({'selected_repository_ids': ids}))
+")
+          printf '%s' "$REPO_IDS" \
+            | gh api -X PUT /user/codespaces/secrets/CLAUDE_CREDENTIALS_JSON/repositories \
+                --input -
+          echo "Granted CLAUDE_CREDENTIALS_JSON to all repos"
 
-# Also update the repo Actions secret so this workflow can use it next run
-r3 = subprocess.run(["gh", "secret", "set", "CLAUDE_CREDENTIALS_JSON",
-    "--repo", "sylt613/dotfiles", "--body", creds_b64], env=env, capture_output=True)
-print(f"Updated repo Actions secret: {'ok' if r3.returncode == 0 else r3.stderr.decode()[:60]}")
-PYEOF
-
-      # ── 5. Push new credentials to the Fly.io machine ────────────────────
+      # ── 5. Push fresh creds to the Fly.io machine ─────────────────────────
       - name: Deploy to Fly.io machine
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-          CREDS_B64: ${{ steps.build.outputs.creds_b64 }}
+          FLY_APP:       vscode-cloud-sylt613
+          CREDS_B64:     ${{ steps.build.outputs.creds_b64 }}
         run: |
-          # Get the running machine ID
-          MACHINE_ID=$(curl -sS \
+          MACHINE_ID=$(curl -fsSL \
             -H "Authorization: Bearer $FLY_API_TOKEN" \
-            "https://api.machines.dev/v1/apps/$FLY_APP/machines" | \
-            python3 -c "
+            "https://api.machines.dev/v1/apps/$FLY_APP/machines" \
+            | python3 -c "
 import sys, json
 ms = json.load(sys.stdin)
 running = [m for m in ms if m.get('state') == 'started']
-print(running[0]['id'])
+print(running[0]['id'] if running else '')
 ")
-
           if [ -z "$MACHINE_ID" ]; then
-            echo "No running machine found in $FLY_APP"
-            exit 1
+            echo "No running machine in $FLY_APP — skipping"
+            exit 0
           fi
-          echo "Deploying to machine $MACHINE_ID"
-
-          # Call exec endpoint — tokens passed as env var, never in cmd args
-          RESULT=$(python3 - <<PYEOF
-import os, json, urllib.request, urllib.error
-
-payload = json.dumps({
-    "cmd": ["/data/local/bin/claude-oauth-apply.sh"],
-    "env": {"NEW_CREDS_B64": os.environ["CREDS_B64"]},
-    "timeout": 30
-}).encode()
-
-req = urllib.request.Request(
-    f"https://api.machines.dev/v1/apps/{os.environ['FLY_APP']}/machines/{os.environ['MACHINE_ID']}/exec",
-    data=payload,
-    headers={
-        "Authorization": f"Bearer {os.environ['FLY_API_TOKEN']}",
-        "Content-Type": "application/json",
-    },
-    method="POST",
-)
-try:
-    with urllib.request.urlopen(req) as r:
-        print(r.read().decode())
-except urllib.error.HTTPError as e:
-    print("HTTP error:", e.code, e.read().decode())
-    raise
-PYEOF
-)
-          echo "Machine exec result: $RESULT"
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer $FLY_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            "https://api.machines.dev/v1/apps/$FLY_APP/machines/$MACHINE_ID/exec" \
+            --data-binary "{\"cmd\":[\"/data/local/bin/claude-oauth-apply.sh\"],\"env\":{\"NEW_CREDS_B64\":\"$CREDS_B64\"},\"timeout\":30}"
