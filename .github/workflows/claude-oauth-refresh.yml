@@ -98,15 +98,8 @@ jobs:
             | gh secret set CLAUDE_CREDENTIALS_JSON --repo sylt613/dotfiles
 
           # Grant to every repo (user secrets have no "all repos" toggle)
-          REPO_IDS=$(gh api /user/repos --paginate --jq '[.[].id]' \
-            | python3 -c "
-import sys, json
-ids = []
-for line in sys.stdin:
-    try: ids.extend(json.loads(line.strip()))
-    except: pass
-print(json.dumps({'selected_repository_ids': ids}))
-")
+          REPO_IDS=$(gh api /user/repos --paginate --jq '.[].id' \
+            | jq -Rs 'split("\n")|map(select(length>0)|tonumber)|{selected_repository_ids:.}')
           printf '%s' "$REPO_IDS" \
             | gh api -X PUT /user/codespaces/secrets/CLAUDE_CREDENTIALS_JSON/repositories \
                 --input -
@@ -122,12 +115,7 @@ print(json.dumps({'selected_repository_ids': ids}))
           MACHINE_ID=$(curl -fsSL \
             -H "Authorization: Bearer $FLY_API_TOKEN" \
             "https://api.machines.dev/v1/apps/$FLY_APP/machines" \
-            | python3 -c "
-import sys, json
-ms = json.load(sys.stdin)
-running = [m for m in ms if m.get('state') == 'started']
-print(running[0]['id'] if running else '')
-")
+            | jq -r '[.[]|select(.state=="started")][0].id // empty')
           if [ -z "$MACHINE_ID" ]; then
             echo "No running machine in $FLY_APP — skipping"
             exit 0
