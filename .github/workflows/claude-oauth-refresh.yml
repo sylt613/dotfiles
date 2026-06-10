@@ -95,16 +95,64 @@ PYEOF
           echo "::add-mask::$B64"
           echo "creds_b64=$B64" >> "$GITHUB_OUTPUT"
 
-      # ── 4. Update CLAUDE_CREDENTIALS_JSON secret so next run has new RT ──
-      - name: Update GitHub secret
+      # ── 4. Update CLAUDE_CREDENTIALS_JSON Codespace user secret ─────────────
+      # Sets the USER-level Codespace secret (not a repo secret) so every new
+      # codespace gets the refreshed credentials. Also re-grants all repos since
+      # GitHub user secrets don't have "all repos" visibility.
+      - name: Update Codespace user secret + grant all repos
         env:
           GH_TOKEN: ${{ secrets.GH_PAT_SECRETS }}
           CREDS_B64: ${{ steps.build.outputs.creds_b64 }}
         run: |
-          printf '%s' "$CREDS_B64" | \
-            gh secret set CLAUDE_CREDENTIALS_JSON \
-              --repo sylt613/dotfiles \
-              --body "$(cat -)"
+          python3 - <<'PYEOF'
+import base64, json, os, subprocess
+from nacl.public import PublicKey, SealedBox
+
+gh_token = os.environ["GH_TOKEN"]
+creds_b64 = os.environ["CREDS_B64"]
+env = {**os.environ, "GH_TOKEN": gh_token}
+
+# Get public key for user Codespace secrets
+import urllib.request
+def gh_api(path, method="GET", body=None):
+    req = urllib.request.Request(
+        f"https://api.github.com{path}",
+        data=json.dumps(body).encode() if body else None,
+        method=method,
+        headers={"Authorization": f"Bearer {gh_token}", "Accept": "application/vnd.github+json",
+                 "Content-Type": "application/json", "X-GitHub-Api-Version": "2022-11-28"}
+    )
+    with urllib.request.urlopen(req) as r:
+        return r.status, (json.loads(r.read()) if r.status not in (204,) else {})
+
+_, key_info = gh_api("/user/codespaces/secrets/public-key")
+pub_key_bytes = base64.b64decode(key_info["key"])
+encrypted = base64.b64encode(SealedBox(PublicKey(pub_key_bytes)).encrypt(
+    base64.b64decode(creds_b64))).decode()
+
+# Update the user Codespace secret
+status, _ = gh_api("/user/codespaces/secrets/CLAUDE_CREDENTIALS_JSON", "PUT", {
+    "encrypted_value": encrypted, "key_id": key_info["key_id"]})
+print(f"Updated user Codespace secret CLAUDE_CREDENTIALS_JSON: HTTP {status}")
+
+# Get all repo IDs and grant them access
+r = subprocess.run(["gh", "api", "/user/repos", "--paginate", "--jq", "[.[].id]"],
+                   capture_output=True, text=True, env=env)
+repo_ids = []
+for line in r.stdout.strip().split("\n"):
+    try: repo_ids.extend(json.loads(line))
+    except: pass
+payload = json.dumps({"selected_repository_ids": repo_ids})
+r2 = subprocess.run(["gh", "api", "-X", "PUT",
+    "/user/codespaces/secrets/CLAUDE_CREDENTIALS_JSON/repositories", "--input", "-"],
+    input=payload.encode(), capture_output=True, env=env)
+print(f"Granted to {len(repo_ids)} repos: {'ok' if r2.returncode == 0 else r2.stderr.decode()[:60]}")
+
+# Also update the repo Actions secret so this workflow can use it next run
+r3 = subprocess.run(["gh", "secret", "set", "CLAUDE_CREDENTIALS_JSON",
+    "--repo", "sylt613/dotfiles", "--body", creds_b64], env=env, capture_output=True)
+print(f"Updated repo Actions secret: {'ok' if r3.returncode == 0 else r3.stderr.decode()[:60]}")
+PYEOF
 
       # ── 5. Push new credentials to the Fly.io machine ────────────────────
       - name: Deploy to Fly.io machine
