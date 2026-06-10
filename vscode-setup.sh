@@ -33,9 +33,10 @@ EXTENSIONS=(
     calgan.oai-provider
 )
 
-# Overridable for tests.
+# Overridable for tests. IPC sockets live under XDG_RUNTIME_DIR on current
+# images and /tmp on older ones — search both (space-separated globs).
 VSROOT="${DOTFILES_VSCODE_ROOT:-/vscode}"
-IPC_GLOB="${DOTFILES_VSCODE_IPC_GLOB:-/tmp/vscode-ipc-*.sock}"
+IPC_GLOB="${DOTFILES_VSCODE_IPC_GLOB:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/vscode-ipc-*.sock /tmp/vscode-ipc-*.sock}"
 WAIT="${DOTFILES_VSCODE_WAIT:-1800}"
 POLL="${DOTFILES_VSCODE_POLL:-10}"
 
@@ -47,9 +48,25 @@ if [ -z "${NODE_EXTRA_CA_CERTS:-}" ] && [ -f /etc/ssl/certs/ca-certificates.crt 
     export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
 fi
 
+proc_ext_dir() {
+    # Most reliable: ask a running VS Code server which extensions dir it was
+    # started with (--extensions-dir <path> in its cmdline). Only trust paths
+    # under $HOME so a foreign/test process can't redirect us.
+    local pid dir
+    for pid in $(pgrep -f -- '--extensions-dir' 2>/dev/null); do
+        dir=$(tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null \
+              | awk 'prev=="--extensions-dir"{print; exit}{prev=$0}')
+        case "$dir" in
+            "$HOME"/*) printf '%s\n' "$dir"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
 ext_dir() {
     # Codespaces server keeps extensions in ~/.vscode-remote/extensions;
     # plain dev containers / SSH use ~/.vscode-server/extensions.
+    proc_ext_dir && return 0
     if [ -d "$HOME/.vscode-remote" ] || [ -d "$VSROOT" ]; then
         echo "$HOME/.vscode-remote/extensions"
     elif [ -d "$HOME/.vscode-server" ]; then
