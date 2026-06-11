@@ -263,6 +263,24 @@ assert_same "$H/.claude.json" "$SB/claude.json.orig" "~/.claude.json left byte-i
 assert_same "$H/.claude/settings.json" "$SB/settings.json.orig" "settings.json left byte-identical"
 assert_grep "$H/.dotfiles-install.log" "LEFT UNTOUCHED" "non-clobber warning logged"
 
+# ── 8b. DEAD creds + valid token: dead creds must NOT shadow the token ───────
+# The credentials file outranks CLAUDE_CODE_OAUTH_TOKEN in Claude's auth
+# order, and a rotated-out snapshot can never refresh — seeding it would give
+# every new codespace a login screen despite a perfectly valid 1-year token.
+CURRENT="dead-creds-not-seeded"
+say "▶ $CURRENT"
+new_sandbox
+DEAD_CREDS='{"claudeAiOauth":{"accessToken":"sk-ant-oat01-DEADTOKEN","refreshToken":"sk-ant-ort01-ROTTED","expiresAt":1000000000000,"scopes":["user:inference"],"subscriptionType":"max"}}'
+TEST_WAIT=3 run_install CLAUDE_CREDENTIALS_JSON="$DEAD_CREDS" CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-FRESH"
+assert_nofile "$H/.claude/.credentials.json"
+assert_grep "$H/.claude/settings.json" "sk-ant-oat01-FRESH" "valid token pinned, not shadowed"
+assert_grep "$H/.dotfiles-install.log" "NOT seeding" "shadow-prevention logged"
+# …and if a previous (older) run already seeded the dead snapshot, a re-run
+# must remove it so the token takes over.
+printf '%s' "$DEAD_CREDS" > "$H/.claude/.credentials.json"
+TEST_WAIT=3 run_install CLAUDE_CREDENTIALS_JSON="$DEAD_CREDS" CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-FRESH"
+assert_nofile "$H/.claude/.credentials.json"
+
 # ── 9. creds + token together: both live — creds seeded AND token pinned ─────
 # (refresh tokens are single-use; the static setup-token in settings env is the
 # rotation-proof fallback if the credentials family dies)
