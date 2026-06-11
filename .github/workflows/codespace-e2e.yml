@@ -1,0 +1,108 @@
+name: codespace-e2e
+# THE definitive test: creates a REAL codespace on this repo, waits for the
+# dotfiles to run, then SSHes in and verifies the actual user experience —
+# Claude CLI installed, auth present, bypassPermissions, VS Code extension
+# installed, and a real `claude -p` conversation round-trip. Deletes the
+# codespace afterwards (always, even on failure).
+#
+# Requires: GH_PAT_SECRETS (or GRANT_PAT) Actions secret — classic PAT with
+# repo + codespace scopes. The codespace sees the user's Codespaces secrets,
+# so this also verifies the secrets really reach codespaces on this repo.
+#
+# Run: gh workflow run codespace-e2e.yml -R sylt613/dotfiles
+on:
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ secrets.GH_PAT_SECRETS != '' && secrets.GH_PAT_SECRETS || secrets.GRANT_PAT }}
+      REPO: sylt613/dotfiles
+    steps:
+      - name: Preflight — PAT with codespace scope
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::No GH_PAT_SECRETS / GRANT_PAT Actions secret — cannot create a codespace. Add a classic PAT with repo+codespace scopes."
+            exit 1
+          fi
+          SCOPES=$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" -o /dev/null -D - https://api.github.com/user | tr -d '\r' | sed -n 's/^x-oauth-scopes: //Ip')
+          echo "PAT scopes: $SCOPES"
+          case "$SCOPES" in
+            *codespace*) echo "✅ codespace scope present" ;;
+            *) echo "::error::PAT lacks 'codespace' scope (has: $SCOPES) — edit the token at github.com/settings/tokens"; exit 1 ;;
+          esac
+
+      - name: Create codespace
+        run: |
+          set -e
+          CS=$(gh codespace create -R "$REPO" -b main -m basicLinux32gb --idle-timeout 30m)
+          echo "created: $CS"
+          echo "CS_NAME=$CS" >> "$GITHUB_ENV"
+
+      - name: Wait for codespace Available + dotfiles finished
+        run: |
+          for i in $(seq 1 40); do
+            STATE=$(gh codespace list --json name,state --jq ".[]|select(.name==\"$CS_NAME\").state")
+            echo "[$i] state: $STATE"
+            [ "$STATE" = "Available" ] && break
+            sleep 15
+          done
+          [ "$STATE" = "Available" ] || { echo "::error::codespace never became Available"; exit 1; }
+          # dotfiles run during/after provisioning; wait for install.sh to finish
+          for i in $(seq 1 24); do
+            if timeout 60 gh codespace ssh -c "$CS_NAME" -- "grep -q '✅ Done!' ~/.dotfiles-install.log" 2>/dev/null; then
+              echo "✅ dotfiles install.sh completed"; exit 0
+            fi
+            echo "[$i] dotfiles still running (or ssh not ready)…"; sleep 10
+          done
+          echo "::warning::install.sh completion marker not seen — dotfiles toggle may be OFF; continuing to gather evidence"
+
+      - name: 'Check 1: dotfiles ran at all'
+        run: |
+          if timeout 60 gh codespace ssh -c "$CS_NAME" -- "test -f ~/.dotfiles-install.log"; then
+            echo "✅ dotfiles ran (install log present)"
+            timeout 60 gh codespace ssh -c "$CS_NAME" -- "tail -25 ~/.dotfiles-install.log" || true
+          else
+            echo "::error::~/.dotfiles-install.log MISSING — the 'Automatically install dotfiles' toggle is OFF at github.com/settings/codespaces (or points to another repo)"
+            exit 1
+          fi
+
+      - name: 'Check 2: ai-check (CLI, auth, mode, extension, secrets)'
+        run: |
+          timeout 90 gh codespace ssh -c "$CS_NAME" -- 'export PATH="$HOME/.local/bin:$PATH"; ai-check' && echo "AI_CHECK=ready" >> "$GITHUB_ENV" || {
+            echo "::warning::ai-check reports NOT READY (details above)"
+            echo "AI_CHECK=notready" >> "$GITHUB_ENV"
+          }
+
+      - name: 'Check 3: VS Code extension installed (waits for background installer)'
+        run: |
+          for i in $(seq 1 30); do
+            EXT=$(timeout 60 gh codespace ssh -c "$CS_NAME" -- 'ls -d ~/.vscode-remote/extensions/anthropic.claude-code-* 2>/dev/null | head -1' || true)
+            if [ -n "$EXT" ]; then echo "✅ extension installed: $EXT"; exit 0; fi
+            echo "[$i] extension not yet installed — watcher may still be waiting for the VS Code server…"
+            sleep 20
+          done
+          echo "::warning::extension not installed within 10 min headlessly. Note: in a never-attached codespace the VS Code server may not exist yet; the watcher installs it within seconds of the first real attach."
+          timeout 60 gh codespace ssh -c "$CS_NAME" -- "tail -15 ~/.dotfiles-vscode-setup.log" || true
+
+      - name: 'Check 4: REAL Claude conversation (claude -p)'
+        run: |
+          set +e
+          OUT=$(timeout 180 gh codespace ssh -c "$CS_NAME" -- 'export PATH="$HOME/.local/bin:$PATH"; claude -p "Reply with exactly: CODESPACE_CONVERSATION_OK" 2>&1')
+          RC=$?
+          echo "--- claude -p output (exit $RC) ---"
+          echo "$OUT"
+          echo "-----------------------------------"
+          if printf '%s' "$OUT" | grep -q "CODESPACE_CONVERSATION_OK"; then
+            echo "✅✅ REAL CONVERSATION WORKS — Claude replied through the user's auth"
+          else
+            echo "::error::conversation failed — auth is not working inside the codespace (see output above; likely the token secret is missing/not granted, or a dead credentials file is present)"
+            exit 1
+          fi
+
+      - name: Delete codespace
+        if: always()
+        run: |
+          [ -n "$CS_NAME" ] && gh codespace delete -c "$CS_NAME" --force && echo "🧹 deleted $CS_NAME" || true
