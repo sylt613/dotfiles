@@ -13,17 +13,20 @@ Every new GitHub Codespace you create will have:
 
 ## Fastest path: one command
 
-On your **own machine** (where you're logged into Claude Code and the
-[gh CLI](https://cli.github.com)) — not inside a codespace:
+On any machine where you're logged into Claude Code and the
+[gh CLI](https://cli.github.com) — your laptop **or an already-working
+codespace** (those have gh pre-wired with your PAT):
 
 ```bash
+claude setup-token        # approve in browser → prints sk-ant-oat01-…
 git clone https://github.com/sylt613/dotfiles && cd dotfiles
-bash setup-secrets.sh
+bash setup-secrets.sh     # paste the token when asked
 ```
 
-It uploads your Claude login to your GitHub Codespaces user secrets and grants
-them to **all your current repos** automatically. Then check the dotfiles toggle
-(step 1 below) once, and you're done.
+It uploads the token to your GitHub Codespaces user secrets as
+`CLAUDE_CODE_OAUTH_TOKEN` (the static ~1-year token — **the** reliable auth)
+and grants it to **all your current repos** automatically. Then check the
+dotfiles toggle (step 1 below) once, and you're done.
 
 **When you create a new repo**, re-run:
 
@@ -79,8 +82,8 @@ Still on [github.com/settings/codespaces](https://github.com/settings/codespaces
 
 | Secret | Required? | What to put in it |
 |---|---|---|
-| `CLAUDE_CODE_OAUTH_TOKEN` | **Yes** | The `sk-ant-oat01-…` value from `claude setup-token` |
-| `CLAUDE_CREDENTIALS_JSON` | Optional (backup) | Full credentials with refresh token: `base64 -w0 ~/.claude/.credentials.json` on a logged-in Linux machine |
+| `CLAUDE_CODE_OAUTH_TOKEN` | **Yes** | The `sk-ant-oat01-…` value from `claude setup-token` — valid ~1 year, immune to refresh-token rotation |
+| `CLAUDE_CREDENTIALS_JSON` | ⚠️ Avoid (opt-in via `setup-secrets.sh --with-creds`) | A snapshot that **dies** the moment any Claude install rotates the refresh token; a dead one used to shadow the valid token and block login. The dotfiles now refuse to seed it when expired, but it's still just noise |
 | `GH_CODESPACE_PAT` | Optional (recommended) | GitHub Personal Access Token (classic, `repo` + `codespace` scopes) — needed for keep-alive and git auth on private repos |
 | `FIREWORKS_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | Optional | For using additional models in the OAI-provider extension |
 
@@ -114,6 +117,17 @@ To make codespaces start instantly: enable a **prebuild** (repo → Settings →
 
 ---
 
+## Maintenance (everything there is, ever)
+
+| When | What |
+|---|---|
+| **~once a year** — the token expires | `claude setup-token` → `bash setup-secrets.sh`. That's the whole renewal. |
+| **you create a new repo** | `bash setup-secrets.sh --grant` (GitHub can't grant user secrets to "all future repos") — or let the daily `grant-secrets` workflow catch it |
+| **a codespace shows a login screen** | `rm -f ~/.claude/.credentials.json` inside it, restart Claude — a stale credentials file was shadowing the token |
+| **you want proof it all works** | repo → Actions → `codespace-e2e` → Run workflow. It creates a real codespace, verifies the extension + auth + an actual Claude conversation, and deletes it. Green = everything works. |
+
+---
+
 ## Recovery (if a codespace's Claude config breaks)
 
 A codespace rebuild wipes `$HOME`. To restore by hand inside a running codespace:
@@ -124,6 +138,9 @@ bash ~/.ai-dotfiles/install.sh
 
 # Or if the dotfiles cloned to the persisted share:
 bash /workspaces/.codespaces/.persistedshare/dotfiles/install.sh
+
+# If STILL logged out: a dead credentials file is shadowing the token
+rm -f ~/.claude/.credentials.json
 
 # Confirm everything is working
 ai-check
