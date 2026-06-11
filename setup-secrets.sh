@@ -1,16 +1,18 @@
 #!/bin/bash
-# One-command Codespaces secret setup. Run this ON YOUR OWN MACHINE (laptop /
-# any box where you're logged into Claude Code and the gh CLI) — NOT inside a
-# codespace:
+# One-command Codespaces secret setup. Run on any machine where you're logged
+# into Claude Code and gh — your laptop OR a working codespace (codespaces
+# already have gh wired with your PAT, so this works great from there):
 #
-#   bash setup-secrets.sh              # first-time setup (set secrets + grant all repos)
-#   bash setup-secrets.sh --grant      # grant all current repos (re-run for new repos)
+#   bash setup-secrets.sh               # set the token + grant all repos
+#   bash setup-secrets.sh --grant       # only re-grant repos (after creating a new repo)
+#   bash setup-secrets.sh --with-creds  # also upload a credentials snapshot (rarely needed)
 #
 # What it sets:
-#   CLAUDE_CREDENTIALS_JSON  if ~/.claude/.credentials.json exists locally
-#                            (Linux installs — best option, has refresh token)
-#   CLAUDE_CODE_OAUTH_TOKEN  otherwise (macOS keeps creds in Keychain): you
-#                            run `claude setup-token` and paste the result
+#   CLAUDE_CODE_OAUTH_TOKEN  THE auth that lasts: `claude setup-token`, ~1 year,
+#                            immune to refresh-token rotation
+#   CLAUDE_CREDENTIALS_JSON  opt-in only (--with-creds): same-day bootstrap that
+#                            DIES as soon as any Claude install rotates the
+#                            refresh token — never rely on it
 #   GH_CODESPACE_PAT         optional, prompted (Enter to skip)
 #
 # NOTE: GitHub user-level Codespace secrets can only be granted to SPECIFIC
@@ -91,20 +93,36 @@ set_secret() {  # $1 = name, value on stdin
     fi
 }
 
-echo "🔑 Claude credentials..."
-CRED="$HOME/.claude/.credentials.json"
-if [ -f "$CRED" ] && python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["claudeAiOauth"]["accessToken"]' "$CRED" 2>/dev/null; then
-    # base64 -w0 is GNU-only; tr strips newlines portably (macOS/BSD too)
-    base64 < "$CRED" | tr -d '\n' | set_secret CLAUDE_CREDENTIALS_JSON
+# ── Token FIRST. The 1-year setup-token is the only auth that survives:
+# credentials snapshots die the moment any Claude install rotates the refresh
+# token (single-use), and a dead snapshot used to shadow the token entirely.
+echo "🔑 Claude token (sk-ant-oat01-…) — THE reliable auth, valid ~1 year"
+if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    echo "  using CLAUDE_CODE_OAUTH_TOKEN from environment"
+    TOKEN="$CLAUDE_CODE_OAUTH_TOKEN"
 else
-    echo "  no local credentials file (normal on macOS — Keychain)."
-    echo "  run 'claude setup-token' in another terminal, then paste the sk-ant-oat01-... value:"
+    echo "  run 'claude setup-token' (here or in another terminal), then paste the result:"
     printf "  token: "
     IFS= read -r TOKEN
-    case "$TOKEN" in
-        sk-ant-oat01-*) printf '%s' "$TOKEN" | set_secret CLAUDE_CODE_OAUTH_TOKEN ;;
-        *) echo "  ⚠️ that doesn't look like a setup-token value — skipped" ;;
-    esac
+fi
+case "$TOKEN" in
+    sk-ant-oat01-*) printf '%s' "$TOKEN" | set_secret CLAUDE_CODE_OAUTH_TOKEN ;;
+    "") echo "  ▫️ skipped (no token entered)" ;;
+    *)  echo "  ⚠️ that doesn't look like a setup-token value — skipped" ;;
+esac
+
+# ── Credentials snapshot: OPT-IN only (--with-creds). Useful solely as a
+# same-day bootstrap; it WILL go stale as soon as the refresh token rotates.
+if [ "${1:-}" = "--with-creds" ] || [ "${2:-}" = "--with-creds" ]; then
+    CRED="$HOME/.claude/.credentials.json"
+    if [ -f "$CRED" ] && python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["claudeAiOauth"]["accessToken"]' "$CRED" 2>/dev/null; then
+        echo "🔑 uploading credentials snapshot too (--with-creds)…"
+        echo "  ⚠️ note: this snapshot dies on the next token rotation — the token above is what lasts"
+        # base64 -w0 is GNU-only; tr strips newlines portably (macOS/BSD too)
+        base64 < "$CRED" | tr -d '\n' | set_secret CLAUDE_CREDENTIALS_JSON
+    else
+        echo "  ▫️ --with-creds: no valid local credentials file — skipped"
+    fi
 fi
 
 echo "🔗 GH_CODESPACE_PAT (optional — keep-alive + git on private repos)..."
