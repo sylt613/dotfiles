@@ -21,8 +21,8 @@ Claude CLI, provider config, git/gh auth, and a smart keep-alive.
 
    | Secret | What | How to get it |
    |---|---|---|
-   | `CLAUDE_CODE_OAUTH_TOKEN` | long-lived login token (easiest) | run `claude setup-token` on any logged-in machine, paste the `sk-ant-oat01-…` value |
-   | `CLAUDE_CREDENTIALS_JSON` | full credentials incl. refresh token (alternative/extra) | `base64 -w0 ~/.claude/.credentials.json` on a logged-in Linux machine (raw JSON also accepted) |
+   | `CLAUDE_CODE_OAUTH_TOKEN` | **THE auth** — static login token, valid ~1 year, immune to refresh-token rotation | run `claude setup-token` on any logged-in machine (laptop or working codespace), paste the `sk-ant-oat01-…` value |
+   | `CLAUDE_CREDENTIALS_JSON` | ⚠️ opt-in only (`setup-secrets.sh --with-creds`) — a snapshot that **dies** as soon as any Claude install rotates the refresh token, and a dead one used to block login entirely. Don't use unless you know why you need it | `base64 -w0 ~/.claude/.credentials.json` |
    | `GH_CODESPACE_PAT` | optional: full-scope PAT for keep-alive + git/gh on private repos | github.com/settings/tokens (classic, `repo` + `codespace` scopes) |
    | `FIREWORKS_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | optional: OAI-provider extension models | provider dashboards |
 
@@ -57,10 +57,14 @@ happens before the VS Code server is up — so the old
 
 - `install.sh` — entrypoint GitHub runs at creation. Never aborts halfway;
   logs to `~/.dotfiles-install.log`.
-- `claude-auth.sh` — seeds `~/.claude/.credentials.json` from
-  `CLAUDE_CREDENTIALS_JSON` (raw **or** base64) and/or wires
-  `CLAUDE_CODE_OAUTH_TOKEN` into `~/.claude/settings.json → env`, which both
-  the CLI **and the extension** read regardless of process environment.
+- `claude-auth.sh` — wires `CLAUDE_CODE_OAUTH_TOKEN` into
+  `~/.claude/settings.json → env`, which both the CLI **and the extension**
+  read regardless of process environment. Also seeds
+  `~/.claude/.credentials.json` from `CLAUDE_CREDENTIALS_JSON` (raw or base64)
+  — but **never when those credentials are expired and a token exists**: the
+  credentials file outranks the token in Claude's auth order, so a dead
+  snapshot would shadow a perfectly valid token (this exact bug caused the
+  "401 / login screen despite a valid 1-year token" failures).
 - `vscode-setup.sh` — background watcher that waits (up to 30 min) for the VS
   Code server, then installs extensions headlessly via the server's
   `code-server` CLI into `~/.vscode-remote/extensions` (works before you even
@@ -80,6 +84,12 @@ happens before the VS Code server is up — so the old
 
 - `verify` — runs both test suites on every push to main. Should always be
   green; a red run means a script regression.
+- `codespace-e2e` — **the definitive canary** (manual: Actions tab → run, or
+  `gh workflow run codespace-e2e.yml`). Creates a REAL codespace on this repo,
+  verifies dotfiles ran, ai-check is READY, the extension installed, and that
+  a real `claude -p` conversation round-trips with your secrets — then deletes
+  the codespace. Green = the whole system works for real. Needs the
+  `GH_PAT_SECRETS` Actions secret (classic PAT, repo + codespace scopes).
 - `grant-secrets` — daily 06:00 UTC + manual. Grants every Codespace secret to
   all your repos. Needs a classic PAT (repo + codespace scopes) in the
   `GRANT_PAT` (or `GH_PAT_SECRETS`) **Actions** secret of this repo; without
@@ -111,6 +121,17 @@ and anything written into a prebuild snapshot is stored and shared — never
 bake tokens in. Login, auto-mode, and keep-alive stay with these dotfiles
 (they run at create time and compose fine with prebuilds).
 
+## Housekeeping (the complete maintenance runbook)
+
+| When | What to do |
+|---|---|
+| **~once a year** (token expires) | `claude setup-token` anywhere logged-in → `bash setup-secrets.sh` → done. Optionally run the `codespace-e2e` workflow to confirm. |
+| **created a new repo** | `bash setup-secrets.sh --grant` (or dispatch the `grant-secrets` workflow; it also runs daily at 06:00 UTC if `GRANT_PAT`/`GH_PAT_SECRETS` is set). User secrets can't be granted to "all future repos" — GitHub limitation. |
+| **codespace shows a login screen** | `rm -f ~/.claude/.credentials.json` inside it, restart Claude — a dead credentials file was shadowing the token (old dotfiles clone). New codespaces are immune. |
+| **want proof everything works** | Actions tab → `codespace-e2e` → Run workflow. Green = extension + auth + real conversation verified in a real codespace. |
+| **rotated/revoked the token** | same as the yearly step: mint + `setup-secrets.sh`. |
+| **never** | do NOT schedule `claude-oauth-refresh`, and do NOT upload credentials snapshots unless you know why (`--with-creds`) — both decay by design (single-use refresh tokens). |
+
 ## Recovery (if a codespace's Claude config ever breaks)
 
 Rebuilding a codespace wipes `$HOME` (GitHub behavior) — config comes back
@@ -119,6 +140,7 @@ only if dotfiles run again. To restore by hand inside a codespace:
 ```bash
 cp ~/.claude.json.backup ~/.claude.json    # Claude keeps this backup itself
 bash /workspaces/.codespaces/.persistedshare/dotfiles/install.sh   # re-run setup
+rm -f ~/.claude/.credentials.json          # if STILL logged out: kill a shadowing dead credentials file
 ai-check                                   # confirm
 ```
 
