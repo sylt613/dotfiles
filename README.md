@@ -76,6 +76,24 @@ happens before the VS Code server is up — so the old
 - `test/run-tests.sh` — sandbox harness that simulates the whole codespace
   flow (fake HOME, fake `/vscode`, mock CLIs); run it after changing anything.
 
+## GitHub workflows in this repo
+
+- `verify` — runs both test suites on every push to main. Should always be
+  green; a red run means a script regression.
+- `grant-secrets` — daily 06:00 UTC + manual. Grants every Codespace secret to
+  all your repos. Needs a classic PAT (repo + codespace scopes) in the
+  `GRANT_PAT` (or `GH_PAT_SECRETS`) **Actions** secret of this repo; without
+  one it no-ops cleanly instead of failing.
+- `claude-oauth-refresh` — **manual-only, on purpose.** Anthropic refresh
+  tokens are single-use: any Claude install that refreshes rotates the token
+  and invalidates every stored copy, so a scheduled refresh is guaranteed to
+  decay into permanent `invalid_grant` failures (which is exactly what the old
+  cron did). Dispatch it only right after seeding fresh credentials into this
+  repo's `CLAUDE_CREDENTIALS_JSON` Actions secret. The reliable everyday auth
+  is the static `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`, valid ~1
+  year, immune to rotation) — credentials JSON is the optional extra, not the
+  foundation.
+
 ## Even more reliable: per-repo devcontainer (+ optional prebuild)
 
 Dotfiles are account-wide but install the extension *after* creation. For

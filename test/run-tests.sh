@@ -263,13 +263,15 @@ assert_same "$H/.claude.json" "$SB/claude.json.orig" "~/.claude.json left byte-i
 assert_same "$H/.claude/settings.json" "$SB/settings.json.orig" "settings.json left byte-identical"
 assert_grep "$H/.dotfiles-install.log" "LEFT UNTOUCHED" "non-clobber warning logged"
 
-# ── 9. creds + token together: creds win, token NOT pinned into settings ─────
+# ── 9. creds + token together: both live — creds seeded AND token pinned ─────
+# (refresh tokens are single-use; the static setup-token in settings env is the
+# rotation-proof fallback if the credentials family dies)
 CURRENT="creds-and-token"
 say "▶ $CURRENT"
 new_sandbox
 TEST_WAIT=3 run_install CLAUDE_CREDENTIALS_JSON="$CREDS_JSON" CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-STALE"
 assert_grep "$H/.claude/.credentials.json" "sk-ant-oat01-TESTTOKEN" "credentials file seeded"
-assert_nogrep "$H/.claude/settings.json" "sk-ant-oat01-STALE" "static token NOT pinned over refreshable creds"
+assert_grep "$H/.claude/settings.json" "sk-ant-oat01-STALE" "static token pinned as fallback alongside creds"
 assert_file "$H/.dotfiles-state/auth-configured"
 
 # ── summary ──────────────────────────────────────────────────────────────────
