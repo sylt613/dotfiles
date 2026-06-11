@@ -23,6 +23,10 @@ cred_expiry() {
     python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("claudeAiOauth",{}).get("expiresAt",0))' "$1" 2>/dev/null || echo 0
 }
 
+cred_expired() {  # true if the file's accessToken expiry is in the past
+    python3 -c 'import json,sys,time; d=json.load(open(sys.argv[1])).get("claudeAiOauth",{}); e=d.get("expiresAt",0); sys.exit(0 if e and e/1000 < time.time() else 1)' "$1" 2>/dev/null
+}
+
 # ── Full credentials JSON (carries refresh token → survives token expiry) ────
 if [ -n "${CLAUDE_CREDENTIALS_JSON:-}" ]; then
     tmp=$(mktemp)
@@ -32,20 +36,35 @@ if [ -n "${CLAUDE_CREDENTIALS_JSON:-}" ]; then
         printf '%s' "$CLAUDE_CREDENTIALS_JSON" | base64 -d > "$tmp" 2>/dev/null || true
     fi
     if cred_valid "$tmp"; then
-        if [ ! -f "$CRED" ] || [ "$(cred_expiry "$tmp")" -gt "$(cred_expiry "$CRED")" ]; then
+        # CRITICAL: the credentials file OUTRANKS CLAUDE_CODE_OAUTH_TOKEN in
+        # Claude Code's auth order, and refresh tokens are single-use — once
+        # any install rotates the family, the snapshot in the secret is dead
+        # and seeding it SHADOWS the (valid, 1-year) setup-token → login
+        # screen. So: never seed expired credentials when a token is present.
+        if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && cred_expired "$tmp"; then
+            echo "  ⚠️ CLAUDE_CREDENTIALS_JSON is EXPIRED — NOT seeding it (it would shadow the valid CLAUDE_CODE_OAUTH_TOKEN)"
+            # If an earlier run seeded this same dead snapshot, remove it so it
+            # stops shadowing the token. Only a byte-identical file is ours to
+            # remove — a live file Claude has refreshed never matches.
+            if [ -f "$CRED" ] && cmp -s "$tmp" "$CRED"; then
+                rm -f "$CRED"
+                echo "     removed previously-seeded dead credentials file — token auth now active"
+            fi
+        elif [ ! -f "$CRED" ] || [ "$(cred_expiry "$tmp")" -gt "$(cred_expiry "$CRED")" ]; then
             install -m 600 "$tmp" "$CRED"
             echo "  ✅ ~/.claude/.credentials.json seeded from CLAUDE_CREDENTIALS_JSON"
+            configured=1
         else
             echo "  ✅ keeping existing credentials.json (newer than the secret)"
+            configured=1
         fi
-        configured=1
-        python3 - "$CRED" <<'PY'
+        [ -f "$CRED" ] && python3 - "$CRED" <<'PY'
 import json, sys, time
 d = json.load(open(sys.argv[1]))["claudeAiOauth"]
 exp = d.get("expiresAt", 0)
 if exp and exp / 1000 < time.time():
     if d.get("refreshToken"):
-        print("  ℹ️ access token in the secret is expired — Claude will auto-refresh it")
+        print("  ℹ️ access token in the secret is expired — Claude will try to refresh it (works only if no other install rotated it first)")
     else:
         print("  ⚠️ access token EXPIRED and no refresh token — re-export CLAUDE_CREDENTIALS_JSON!")
 PY

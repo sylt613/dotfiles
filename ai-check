@@ -31,6 +31,13 @@ PY
 )
     pass "credentials.json present (${info:-unreadable})"
     auth=1
+    # A dead credentials file OUTRANKS a valid setup-token in Claude's auth
+    # order — the #1 cause of "valid 1-year token but still a login screen".
+    if python3 -c 'import json,sys,time; d=json.load(open(sys.argv[1])).get("claudeAiOauth",{}); e=d.get("expiresAt",0); sys.exit(0 if e and e/1000 < time.time() else 1)' "$CRED" 2>/dev/null; then
+        if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || grep -q '"CLAUDE_CODE_OAUTH_TOKEN"' "$HOME/.claude/settings.json" 2>/dev/null; then
+            warn "credentials.json is EXPIRED and SHADOWS your valid OAuth token — fix: rm ~/.claude/.credentials.json"
+        fi
+    fi
 fi
 if grep -q '"CLAUDE_CODE_OAUTH_TOKEN"' "$HOME/.claude/settings.json" 2>/dev/null; then
     pass "OAuth token wired into ~/.claude/settings.json env"
