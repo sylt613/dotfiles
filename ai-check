@@ -79,7 +79,7 @@ else
     fail "not installed and installer not running (log: ~/.dotfiles-vscode-setup.log)"
 fi
 
-echo "── Secrets visible in this codespace"
+echo "── Secrets visible in this shell (note: ssh sessions often don't show codespace secrets — the wired settings.json above is what counts)"
 for s in CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CREDENTIALS_JSON GH_CODESPACE_PAT FIREWORKS_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY; do
     if [ -n "${!s}" ]; then echo "  ✅ $s"; else echo "  ▫️ $s (not set — add/grant at github.com/settings/codespaces)"; fi
 done
