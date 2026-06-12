@@ -65,6 +65,17 @@ else
     warn "no defaultMode set (will ask for permissions)"
 fi
 
+echo "── Persistent Claude tmux session"
+if command -v tmux >/dev/null 2>&1; then
+    if tmux has-session -t "${CLAUDE_TMUX_SESSION:-claude}" 2>/dev/null; then
+        pass "tmux session '${CLAUDE_TMUX_SESSION:-claude}' running — attach with: claude-tui"
+    else
+        warn "no '${CLAUDE_TMUX_SESSION:-claude}' tmux session (start it: claude-tui — it also auto-starts on the next shell)"
+    fi
+else
+    warn "tmux not installed — persistent full-auto Claude session unavailable"
+fi
+
 echo "── VS Code extension (anthropic.claude-code)"
 found=""
 for d in "$HOME"/.vscode-remote/extensions/anthropic.claude-code-* \

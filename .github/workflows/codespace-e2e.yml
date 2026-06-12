@@ -102,6 +102,30 @@ jobs:
             exit 1
           fi
 
+      - name: 'Check 5: persistent full-auto Claude tmux session'
+        run: |
+          set +e
+          OK=
+          for i in $(seq 1 6); do
+            if timeout 60 gh codespace ssh -c "$CS_NAME" -- 'command -v tmux >/dev/null 2>&1 && tmux has-session -t claude 2>/dev/null'; then OK=1; break; fi
+            echo "[$i] claude tmux session not up yet…"; sleep 10
+          done
+          if [ -n "$OK" ]; then
+            echo "✅ tmux session 'claude' is running"
+            PANE=$(timeout 60 gh codespace ssh -c "$CS_NAME" -- 'tmux capture-pane -t claude -p 2>/dev/null | grep -v "^$" | tail -15' || true)
+            echo "--- claude pane ---"; echo "$PANE"; echo "-------------------"
+            if printf '%s' "$PANE" | grep -qiE 'No, exit|Is this a project|Bypass Permissions mode'; then
+              echo "::error::Claude tmux pane is blocked on a trust/permission dialog — claude-tmux.sh trust/mode pre-seed regressed"
+              exit 1
+            fi
+            printf '%s' "$PANE" | grep -qiE 'bypass' \
+              && echo "✅✅ Claude is at a clean full-auto prompt in tmux" \
+              || echo "::warning::could not confirm the bypass indicator in the pane (see dump above)"
+          else
+            echo "::warning::no 'claude' tmux session found (tmux may be unavailable on this image, or it didn't start)"
+            timeout 60 gh codespace ssh -c "$CS_NAME" -- 'grep -i tmux ~/.dotfiles-install.log | tail -10' || true
+          fi
+
       - name: Delete codespace
         if: always()
         run: |

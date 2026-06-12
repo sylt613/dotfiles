@@ -48,6 +48,25 @@ EOF
 #!/bin/bash
 exit 22
 EOF
+    # stateful tmux mock: tracks sessions in $HOME and logs every call so tests
+    # can assert what claude-tmux.sh did (created a session, in bypass mode, etc).
+    cat > "$1/tmux" <<'EOF'
+#!/bin/bash
+ST="$HOME/.tmux-mock-sessions"; LOG="$HOME/.tmux-mock.log"
+printf '%s\n' "$*" >> "$LOG"
+sub="${1:-}"; shift 2>/dev/null
+name=""; prev=""
+for a in "$@"; do
+    case "$prev" in -t|-s) name="$a" ;; esac
+    prev="$a"
+done
+case "$sub" in
+    has-session)     grep -qxF "$name" "$ST" 2>/dev/null && exit 0 || exit 1 ;;
+    new-session)     [ -n "$name" ] && { grep -qxF "$name" "$ST" 2>/dev/null || printf '%s\n' "$name" >> "$ST"; }; exit 0 ;;
+    display-message) echo 0; exit 0 ;;
+    *) exit 0 ;;
+esac
+EOF
     chmod +x "$1"/*
 }
 
@@ -121,8 +140,8 @@ run_install() { # extra env as args, e.g. CLAUDE_CODE_OAUTH_TOKEN=x
 CURRENT="syntax"
 say "▶ $CURRENT"
 for f in "$ROOT"/install.sh "$ROOT"/claude-auth.sh "$ROOT"/vscode-setup.sh \
-         "$ROOT"/cs_keepalive.sh "$ROOT"/session-init.sh "$ROOT"/ai-check \
-         "$ROOT"/test/run-tests.sh; do
+         "$ROOT"/cs_keepalive.sh "$ROOT"/claude-tmux.sh "$ROOT"/session-init.sh \
+         "$ROOT"/ai-check "$ROOT"/test/run-tests.sh; do
     bash -n "$f" && ok "bash -n $(basename "$f")" || bad "syntax error in $f"
 done
 
@@ -144,7 +163,15 @@ assert_grep "$H/.claude.json" '"bypassPermissionsModeAccepted": true' "bypass co
 assert_grep "$H/.vscode-remote/data/Machine/settings.json" "kimi" "provider config written"
 assert_file "$H/.dotfiles-state/auth-configured"
 assert_grep "$H/.bashrc" "ai-dotfiles" "bashrc hook installed"
+assert_grep "$H/.bashrc" "claude-tui" "claude-tui attach helper installed"
 assert_file "$H/.local/bin/ai-check"
+
+# Claude auto-started in a persistent tmux session, in full-auto mode
+assert_file "$H/.tmux-mock.log"
+assert_grep "$H/.tmux-mock.log" "new-session" "claude tmux session created at install"
+assert_grep "$H/.tmux-mock.log" "permission-mode bypassPermissions" "tmux launches claude in full-auto mode"
+assert_grep "$H/.tmux-mock-sessions" "^claude$" "claude tmux session registered"
+assert_grep "$H/.claude.json" "hasTrustDialogAccepted" "workspace folder pre-trusted (skips Claude's trust dialog)"
 
 if wait_for_file "$H/.dotfiles-state/extensions-ok" 25; then
     ok "extension watcher finished"
@@ -169,6 +196,9 @@ run_install CLAUDE_CREDENTIALS_JSON="$B64" FIREWORKS_API_KEY=fw-test \
     && ok "second run exit 0" || bad "second run failed"
 n=$(grep -c '# >>> ai-dotfiles >>>' "$H/.bashrc")
 [ "$n" = "1" ] && ok "bashrc hook present exactly once" || bad "bashrc hook duplicated ($n times)"
+# tmux session must NOT be re-created on a rerun (has-session guard holds)
+m=$(grep -c 'permission-mode bypassPermissions' "$H/.tmux-mock.log")
+[ "$m" = "1" ] && ok "tmux session created once across reruns (idempotent)" || bad "tmux new-session ran $m times, want 1"
 
 # ── 2. raw (non-base64) credentials secret ───────────────────────────────────
 CURRENT="raw-json-creds"
@@ -242,6 +272,7 @@ env -i HOME="$H" TERM=dumb PATH="$MOCKS:/usr/local/bin:/usr/bin:/bin" \
     DOTFILES_VSCODE_WAIT=10 DOTFILES_VSCODE_POLL=1 \
     bash -c ". '$ROOT/session-init.sh'"
 assert_grep "$H/.claude/settings.json" "sk-ant-oat01-LATESECRET" "session-init seeded auth post-hoc"
+assert_grep "$H/.tmux-mock-sessions" "^claude$" "session-init re-created the Claude tmux session"
 if wait_for_file "$H/.dotfiles-state/extensions-ok" 15; then
     ok "session-init launched extension watcher"
 else
@@ -291,6 +322,29 @@ TEST_WAIT=3 run_install CLAUDE_CREDENTIALS_JSON="$CREDS_JSON" CLAUDE_CODE_OAUTH_
 assert_grep "$H/.claude/.credentials.json" "sk-ant-oat01-TESTTOKEN" "credentials file seeded"
 assert_grep "$H/.claude/settings.json" "sk-ant-oat01-STALE" "static token pinned as fallback alongside creds"
 assert_file "$H/.dotfiles-state/auth-configured"
+
+# ── 10. claude-tmux is a no-op when a session is already running ─────────────
+CURRENT="tmux-noop-when-running"
+say "▶ $CURRENT"
+new_sandbox
+printf 'claude\n' > "$H/.tmux-mock-sessions"   # pretend a session is already up
+env -i HOME="$H" TERM=dumb PATH="$MOCKS:/usr/local/bin:/usr/bin:/bin" \
+    bash "$ROOT/claude-tmux.sh" >"$SB/ctmux.log" 2>&1
+assert_grep "$SB/ctmux.log" "already running" "claude-tmux no-ops when the session exists"
+assert_nogrep "$H/.tmux-mock.log" "new-session" "no second tmux session spawned"
+
+# ── 11. claude-tmux still exits 0 (best-effort) when tmux is unavailable ──────
+# Use a minimal PATH so no real system tmux leaks in (the test host may have it);
+# the marker disables the apt path, so the missing-tmux branch needs only mkdir.
+CURRENT="tmux-missing-graceful"
+say "▶ $CURRENT"
+new_sandbox
+mkdir -p "$H/.dotfiles-state" "$SB/nobin"
+touch "$H/.dotfiles-state/tmux-install-tried"   # sandbox OFF the real apt-get path
+ln -sf "$(command -v mkdir)" "$SB/nobin/mkdir"
+env -i HOME="$H" PATH="$SB/nobin" /bin/bash "$ROOT/claude-tmux.sh" >"$SB/ctmux2.log" 2>&1 \
+    && ok "claude-tmux exits 0 without tmux" || bad "claude-tmux failed when tmux missing"
+assert_grep "$SB/ctmux2.log" "tmux not available" "logs a clear skip message when tmux missing"
 
 # ── summary ──────────────────────────────────────────────────────────────────
 pkill -f "$ROOT/vscode-setup.sh" 2>/dev/null

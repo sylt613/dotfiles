@@ -3,8 +3,11 @@
 This is sylt613's **GitHub Codespaces dotfiles** repo. Its one job: every new
 codespace comes up with the Claude Code VS Code extension installed, logged in
 via Codespaces secrets, in `bypassPermissions` (full-auto) mode, with a smart
-keep-alive. The whole chain is verified working end-to-end in a real codespace
-(see the `codespace-e2e` workflow — run it to re-verify any time).
+keep-alive — PLUS a full-auto Claude TUI already running in a detached **tmux**
+session (`claude-tui` to attach) that survives disconnects, while the keep-alive
+keeps the machine awake only *while that Claude is working*. The whole chain is
+verified working end-to-end in a real codespace (see the `codespace-e2e`
+workflow — run it to re-verify any time).
 
 ## Hard-won invariants — do not regress these
 
@@ -50,13 +53,36 @@ keep-alive. The whole chain is verified working end-to-end in a real codespace
    `PUT /user/codespaces/secrets/<name>/repositories`. There is **no API at
    all** for the "Automatically install dotfiles" account toggle.
 
+8. **The persistent Claude TUI lives in tmux** (`claude-tmux.sh`), and getting
+   it to open *straight to a usable full-auto prompt* depends on two
+   non-obvious things — both verified end-to-end on a simulated fresh codespace:
+   - **Launch with `--permission-mode bypassPermissions`, NOT the
+     `--dangerously-skip-permissions` flag.** The flag re-shows a bypass warning
+     whose DEFAULT option is "No, exit" — a stray newline into the unattended
+     pane would *kill* the session. The mode flag goes straight in, and still
+     forces bypass even if `settings.json` somehow lost `defaultMode`.
+   - **Pre-seed `projects["<workspace>"].hasTrustDialogAccepted=true` in
+     `~/.claude.json`.** Claude's folder-trust dialog ("Is this a project you
+     trust?") is a SEPARATE gate that `bypassPermissionsModeAccepted` does NOT
+     satisfy; without the trust pre-seed the detached pane hangs on it forever.
+     `claude-tmux.sh` writes it (merge-only, `sys.exit(3)` non-clobber per
+     invariant 5) for the exact dir it `cd`s into.
+   The keep-alive is tmux-aware: "Claude is working" = a transcript `.jsonl`
+   write in the last 2 min OR the Claude tmux pane printed output recently
+   (`#{window_activity}`). An idle Claude pane's `window_activity` is frozen, so
+   idle correctly drops back to the 15-min timeout — don't "improve" this into
+   keeping the box awake whenever the session merely *exists*.
+
 ## Architecture (read order)
 
 - `install.sh` — entrypoint GitHub runs at codespace creation
 - `claude-auth.sh` — auth seeding (see invariants 1–2)
 - `vscode-setup.sh` — background extension installer (invariant 4)
-- `session-init.sh` — `.bashrc` hook: self-heals auth/extension/keep-alive
-- `cs_keepalive.sh` — idle timeout 240 min while Claude works, 15 min idle
+- `session-init.sh` — `.bashrc` hook: self-heals auth/extension/keep-alive/tmux
+- `claude-tmux.sh` — starts (and re-creates after stop/start) the detached
+  full-auto Claude tmux session; pre-trusts the workspace (see invariant 8)
+- `cs_keepalive.sh` — idle timeout 240 min while Claude works (transcript write
+  OR tmux pane activity), 15 min idle
 - `ai-check` — in-codespace diagnostic; `✅ READY` or says exactly what's wrong
 - `setup-secrets.sh` — run by the USER on their machine/working codespace:
   uploads the token to user Codespaces secrets + grants all repos
@@ -66,7 +92,7 @@ keep-alive. The whole chain is verified working end-to-end in a real codespace
 ## Testing — run before any push
 
 ```bash
-bash test/run-tests.sh    # sandbox suite (fake HOME, mock CLIs) — 48 assertions
+bash test/run-tests.sh    # sandbox suite (fake HOME, mock CLIs) — 61 assertions
 bash test/e2e-real.sh     # real VS Code server + marketplace, clean HOME
 ```
 
@@ -93,4 +119,5 @@ When changing auth/seeding behavior, add a scenario to `test/run-tests.sh`
   `bash setup-secrets.sh`
 - New repo: `bash setup-secrets.sh --grant` (or the daily `grant-secrets` cron)
 - Codespace stuck on login screen (old clone): `rm -f ~/.claude/.credentials.json`
+- Attach to the always-on full-auto Claude: `claude-tui` (or `tmux attach -t claude`)
 - Proof of life: dispatch `codespace-e2e`
