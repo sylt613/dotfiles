@@ -65,8 +65,11 @@ claude-tui            # attach to the running full-auto Claude session
 ```
 
 - It opens **straight to the prompt in `bypassPermissions` mode** — no trust
-  dialog, no permission prompts (the workspace folder is pre-trusted and the
-  mode is set explicitly).
+  dialog, no bypass-warning, no permission prompts (workspace pre-trusted, mode
+  set explicitly, and `skipDangerousModePermissionPrompt` set).
+- **Default model is Opus** (switch per session with `/model`). **Fable** is
+  enabled on the account too, but isn't in the `/model` picker — run
+  `claude-fable` (or `claude --model fable`) for a quick Fable session.
 - If you `/exit` or it crashes, the session drops to a shell and `claude-tui`
   restarts it (idempotent). After a codespace **stop/start** the first terminal
   re-creates it automatically.
