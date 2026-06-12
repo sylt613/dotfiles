@@ -54,24 +54,34 @@ workflow — run it to re-verify any time).
    all** for the "Automatically install dotfiles" account toggle.
 
 8. **The persistent Claude TUI lives in tmux** (`claude-tmux.sh`), and getting
-   it to open *straight to a usable full-auto prompt* depends on two
-   non-obvious things — both verified end-to-end on a simulated fresh codespace:
+   it to open *straight to a usable full-auto prompt* depends on THREE
+   non-obvious gates — all THREE must be cleared or the detached pane hangs on a
+   dialog (and you can't see it without attaching). Each was verified in a REAL
+   codespace, not a sim — see the warning at the end about why:
+   - **`skipDangerousModePermissionPrompt: true` in `~/.claude/settings.json`**
+     (install.sh sets it). Suppresses the "WARNING: Bypass Permissions mode —
+     1. No, exit / 2. Yes, I accept" startup dialog. In current Claude Code the
+     in-app `bypassPermissionsModeAccepted` flag does NOT suppress this — only
+     this settings key does. Its default is "No, exit", so a stray newline kills
+     the session.
    - **Launch with `--permission-mode bypassPermissions`, NOT the
-     `--dangerously-skip-permissions` flag.** The flag re-shows a bypass warning
-     whose DEFAULT option is "No, exit" — a stray newline into the unattended
-     pane would *kill* the session. The mode flag goes straight in, and still
-     forces bypass even if `settings.json` somehow lost `defaultMode`.
+     `--dangerously-skip-permissions` flag.** The flag forces bypass but is
+     redundant given the settings, and the mode flag still works even if
+     `settings.json` somehow lost `defaultMode`.
    - **Pre-seed `projects["<workspace>"].hasTrustDialogAccepted=true` in
-     `~/.claude.json`.** Claude's folder-trust dialog ("Is this a project you
-     trust?") is a SEPARATE gate that `bypassPermissionsModeAccepted` does NOT
-     satisfy; without the trust pre-seed the detached pane hangs on it forever.
-     `claude-tmux.sh` writes it (merge-only, `sys.exit(3)` non-clobber per
-     invariant 5) for the exact dir it `cd`s into.
+     `~/.claude.json`** (claude-tmux.sh writes it, merge-only, `sys.exit(3)`
+     non-clobber per invariant 5). The folder-trust dialog ("Is this a project
+     you trust?") is a separate gate that nothing else satisfies.
    The keep-alive is tmux-aware: "Claude is working" = a transcript `.jsonl`
    write in the last 2 min OR the Claude tmux pane printed output recently
    (`#{window_activity}`). An idle Claude pane's `window_activity` is frozen, so
    idle correctly drops back to the 15-min timeout — don't "improve" this into
    keeping the box awake whenever the session merely *exists*.
+   ⚠️ **Do not "verify" the no-dialog launch locally inside a Claude session.**
+   A Claude you spawn inherits `CLAUDE_CODE_CHILD_SESSION=1`/`CLAUDECODE=1` and
+   skips the bypass warning, so every local repro looks clean and lies. The only
+   trustworthy test is a real fresh codespace (the `codespace-e2e` Check 5, or
+   `gh codespace create` + ssh + `tmux capture-pane -t claude -p`).
 
 ## Architecture (read order)
 
@@ -92,7 +102,7 @@ workflow — run it to re-verify any time).
 ## Testing — run before any push
 
 ```bash
-bash test/run-tests.sh    # sandbox suite (fake HOME, mock CLIs) — 61 assertions
+bash test/run-tests.sh    # sandbox suite (fake HOME, mock CLIs) — 64 assertions
 bash test/e2e-real.sh     # real VS Code server + marketplace, clean HOME
 ```
 

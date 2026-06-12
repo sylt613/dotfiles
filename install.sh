@@ -57,12 +57,21 @@ except Exception:
 perms = cfg.get("permissions", {})
 perms["defaultMode"] = "bypassPermissions"
 cfg["permissions"] = perms
+# Suppress the one-time "WARNING: Bypass Permissions mode — 1. No, exit / 2.
+# Yes, I accept" startup dialog. In current Claude Code (verified live in a real
+# codespace, v2.1.174) the in-app `bypassPermissionsModeAccepted` flag does NOT
+# suppress this — only this settings key does. Without it the detached tmux
+# Claude sits on that dialog (whose DEFAULT is "No, exit").
+cfg["skipDangerousModePermissionPrompt"] = True
+# Default model: Opus (the alias auto-tracks the latest Opus). Overridable in
+# the running TUI via /model; reset to this on each fresh codespace.
+cfg["model"] = os.environ.get("CLAUDE_DEFAULT_MODEL", "opus")
 tmp = p + ".tmp." + str(os.getpid())
 with open(tmp, "w") as f:
     json.dump(cfg, f, indent=2)
 os.chmod(tmp, 0o600)
 os.replace(tmp, p)
-print("  ✅ permissions.defaultMode = bypassPermissions")
+print("  ✅ permissions.defaultMode = bypassPermissions (+ skipDangerousModePermissionPrompt, model=%s)" % cfg["model"])
 PY
 
 # ~/.claude.json: skip the theme/login onboarding and the bypass-mode
@@ -187,6 +196,8 @@ if [ -n "\${GH_CODESPACE_PAT:-}" ]; then export GH_TOKEN="\$GH_CODESPACE_PAT"; f
 export AI_DOTFILES_DIR="$DOTFILES_DIR"
 # claude-tui: attach to the persistent full-auto Claude session (starts it if needed)
 claude-tui() { [ -f "\$AI_DOTFILES_DIR/claude-tmux.sh" ] && bash "\$AI_DOTFILES_DIR/claude-tmux.sh" >/dev/null 2>&1; tmux attach -t "\${CLAUDE_TMUX_SESSION:-claude}"; }
+# claude-fable: quick full-auto Claude on the Fable model (not in the /model picker; default stays Opus)
+claude-fable() { claude --model fable "\$@"; }
 if [ -f "\$AI_DOTFILES_DIR/session-init.sh" ]; then . "\$AI_DOTFILES_DIR/session-init.sh"; fi
 # <<< ai-dotfiles <<<
 EOF

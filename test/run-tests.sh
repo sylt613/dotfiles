@@ -158,12 +158,15 @@ assert_file "$H/.claude/.credentials.json"
 assert_mode "$H/.claude/.credentials.json" 600
 assert_grep "$H/.claude/.credentials.json" "sk-ant-oat01-TESTTOKEN" "credentials seeded from base64 secret"
 assert_grep "$H/.claude/settings.json" '"defaultMode": "bypassPermissions"' "auto mode set"
+assert_grep "$H/.claude/settings.json" '"skipDangerousModePermissionPrompt": true' "bypass startup nag suppressed (no accept dialog)"
+assert_grep "$H/.claude/settings.json" '"model": "opus"' "default model = opus"
 assert_grep "$H/.claude.json" '"hasCompletedOnboarding": true' "onboarding pre-accepted"
 assert_grep "$H/.claude.json" '"bypassPermissionsModeAccepted": true' "bypass confirmation pre-accepted"
 assert_grep "$H/.vscode-remote/data/Machine/settings.json" "kimi" "provider config written"
 assert_file "$H/.dotfiles-state/auth-configured"
 assert_grep "$H/.bashrc" "ai-dotfiles" "bashrc hook installed"
 assert_grep "$H/.bashrc" "claude-tui" "claude-tui attach helper installed"
+assert_grep "$H/.bashrc" "claude-fable" "claude-fable helper installed"
 assert_file "$H/.local/bin/ai-check"
 
 # Claude auto-started in a persistent tmux session, in full-auto mode
