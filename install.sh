@@ -158,6 +158,10 @@ else
     echo "  ▫️ GH_CODESPACE_PAT not set — keep-alive inactive (add it at github.com/settings/codespaces)"
 fi
 
+# ── Persistent Claude Code TUI in tmux (survives closing the browser/VS Code) ─
+echo "🖥️  Claude in tmux..."
+bash "$DOTFILES_DIR/claude-tmux.sh"
+
 # ── git + gh CLI with full-scope PAT ─────────────────────────────────────────
 echo "🔗 git/gh..."
 if [ -n "${GH_CODESPACE_PAT:-}" ]; then
@@ -181,6 +185,8 @@ write_rc_block() {
 export PATH="\$HOME/.local/bin:\$PATH"
 if [ -n "\${GH_CODESPACE_PAT:-}" ]; then export GH_TOKEN="\$GH_CODESPACE_PAT"; fi
 export AI_DOTFILES_DIR="$DOTFILES_DIR"
+# claude-tui: attach to the persistent full-auto Claude session (starts it if needed)
+claude-tui() { [ -f "\$AI_DOTFILES_DIR/claude-tmux.sh" ] && bash "\$AI_DOTFILES_DIR/claude-tmux.sh" >/dev/null 2>&1; tmux attach -t "\${CLAUDE_TMUX_SESSION:-claude}"; }
 if [ -f "\$AI_DOTFILES_DIR/session-init.sh" ]; then . "\$AI_DOTFILES_DIR/session-init.sh"; fi
 # <<< ai-dotfiles <<<
 EOF

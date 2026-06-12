@@ -2,7 +2,9 @@
 
 Every new codespace comes up with the **Claude Code VS Code extension installed
 and already logged in**, in full-auto (`bypassPermissions`) mode, plus the
-Claude CLI, provider config, git/gh auth, and a smart keep-alive.
+Claude CLI, provider config, git/gh auth, and a smart keep-alive — **and a
+full-auto Claude TUI already running in a detached `tmux` session** so a task
+keeps going after you close the tab. Attach any time with `claude-tui`.
 
 ## One-time setup (required — the scripts can't do this for you)
 
@@ -44,10 +46,39 @@ Open a terminal in the new codespace and run:
 ai-check
 ```
 
-It checks the CLI, auth, permission mode, the extension, and visible secrets,
-and prints `✅ READY` or tells you exactly what's missing. The extension
-installs in the background — if you attach very fast it can lag the first
-attach by a few seconds; it retries automatically until it lands.
+It checks the CLI, auth, permission mode, the extension, the Claude tmux
+session, and visible secrets, and prints `✅ READY` or tells you exactly what's
+missing. The extension installs in the background — if you attach very fast it
+can lag the first attach by a few seconds; it retries automatically until it
+lands.
+
+## Always-on Claude in tmux (kick off a task, close the tab, come back later)
+
+The setup starts Claude Code in full-auto mode inside a **detached tmux
+session** at codespace creation, so it keeps running even when no editor/browser
+is attached. To use it:
+
+```bash
+claude-tui            # attach to the running full-auto Claude session
+#  …work with Claude…
+# Ctrl-b then d        → detach (Claude keeps running in the background)
+```
+
+- It opens **straight to the prompt in `bypassPermissions` mode** — no trust
+  dialog, no permission prompts (the workspace folder is pre-trusted and the
+  mode is set explicitly).
+- If you `/exit` or it crashes, the session drops to a shell and `claude-tui`
+  restarts it (idempotent). After a codespace **stop/start** the first terminal
+  re-creates it automatically.
+- **Smart keep-alive ties into this:** while that Claude is actively working
+  (writing a transcript, or its tmux pane is printing) the codespace idle
+  timeout is raised to **240 min** so long autonomous runs aren't killed; when
+  it goes quiet (idle at the prompt) it drops back to **15 min** so the machine
+  stops promptly and you don't pay for an idle box. Needs `GH_CODESPACE_PAT`.
+
+> Prefer a different session name? Set `CLAUDE_TMUX_SESSION`. Don't want it at
+> all? It's best-effort — if tmux can't be installed it just skips, and the VS
+> Code extension still works normally.
 
 ## How it works (and why the old version failed)
 
@@ -71,11 +102,17 @@ happens before the VS Code server is up — so the old
   attach), with a remote-CLI + IPC-socket fallback. Log:
   `~/.dotfiles-vscode-setup.log`.
 - `session-init.sh` — hooked into `~/.bashrc`; on every shell it re-seeds
-  auth, re-launches the extension watcher, and restarts the keep-alive if any
-  of them are missing (e.g. after a codespace stop/start or a late-granted
-  secret). Marker files in `~/.dotfiles-state/` keep it a no-op once done.
-- `cs_keepalive.sh` — idle timeout 240 min while Claude is actively writing
-  session files, 15 min otherwise (needs `GH_CODESPACE_PAT`).
+  auth, re-launches the extension watcher, restarts the keep-alive, and
+  re-creates the Claude tmux session if any are missing (e.g. after a codespace
+  stop/start or a late-granted secret). Marker files in `~/.dotfiles-state/`
+  keep it a no-op once done.
+- `claude-tmux.sh` — starts the detached full-auto Claude TUI (`claude-tui` to
+  attach). Installs tmux if the image lacks it, pre-trusts the workspace folder
+  and launches with `--permission-mode bypassPermissions` so it opens with no
+  dialogs, and is idempotent (no-op if the session already exists).
+- `cs_keepalive.sh` — idle timeout 240 min while Claude is working (a transcript
+  write **or** recent output in the Claude tmux pane), 15 min otherwise (needs
+  `GH_CODESPACE_PAT`).
 - `ai-check` — the verifier above.
 - `test/run-tests.sh` — sandbox harness that simulates the whole codespace
   flow (fake HOME, fake `/vscode`, mock CLIs); run it after changing anything.
@@ -86,9 +123,10 @@ happens before the VS Code server is up — so the old
   green; a red run means a script regression.
 - `codespace-e2e` — **the definitive canary** (manual: Actions tab → run, or
   `gh workflow run codespace-e2e.yml`). Creates a REAL codespace on this repo,
-  verifies dotfiles ran, ai-check is READY, the extension installed, and that
-  a real `claude -p` conversation round-trips with your secrets — then deletes
-  the codespace. Green = the whole system works for real. Needs the
+  verifies dotfiles ran, ai-check is READY, the extension installed, the
+  full-auto Claude **tmux** session came up at a clean prompt, and that a real
+  `claude -p` conversation round-trips with your secrets — then deletes the
+  codespace. Green = the whole system works for real. Needs the
   `GH_PAT_SECRETS` Actions secret (classic PAT, repo + codespace scopes).
 - `grant-secrets` — daily 06:00 UTC + manual. Grants every Codespace secret to
   all your repos. Needs a classic PAT (repo + codespace scopes) in the

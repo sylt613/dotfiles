@@ -28,5 +28,14 @@ if [ -n "$_ai_dir" ] && { [ -n "${CODESPACES:-}" ] || [ -n "${CODESPACE_NAME:-}"
        && ! pgrep -f cs_keepalive >/dev/null 2>&1; then
         ( nohup bash "$_ai_dir/cs_keepalive.sh" >>/tmp/.cs_keepalive.log 2>&1 & ) 2>/dev/null
     fi
+
+    # Re-create the persistent Claude tmux session if it's gone (stop/start
+    # kills the in-memory tmux server). Skip when we're *inside* tmux already
+    # (e.g. the session's own fallback shell) so this never self-triggers.
+    if [ -z "${TMUX:-}" ] && [ -f "$_ai_dir/claude-tmux.sh" ] \
+       && command -v tmux >/dev/null 2>&1 \
+       && ! tmux has-session -t "${CLAUDE_TMUX_SESSION:-claude}" 2>/dev/null; then
+        bash "$_ai_dir/claude-tmux.sh" >>"$HOME/.dotfiles-install.log" 2>&1
+    fi
 fi
 unset _ai_dir _ai_state

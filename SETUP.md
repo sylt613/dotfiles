@@ -6,6 +6,9 @@ Every new GitHub Codespace you create will have:
 - **Claude Code VS Code extension** installed and logged in automatically
 - **Full-auto (bypassPermissions) mode** enabled — no permission prompts
 - Claude CLI installed and authenticated
+- **A full-auto Claude TUI already running in a detached `tmux` session** —
+  attach with `claude-tui`; it keeps running after you close the tab, and the
+  keep-alive keeps the codespace awake only while it's actively working
 - Smart keep-alive (prevents idle timeout while Claude is working)
 - git/gh wired with your credentials
 
@@ -105,7 +108,10 @@ Open a terminal in the new codespace and run:
 ai-check
 ```
 
-You'll see `✅ READY` or a plain-English explanation of exactly what's missing.
+You'll see `✅ READY` or a plain-English explanation of exactly what's missing
+(it also reports whether the Claude tmux session is up). To start talking to the
+always-on full-auto Claude, run `claude-tui` — detach with `Ctrl-b d` and it
+keeps working in the background.
 
 ---
 
