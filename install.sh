@@ -32,6 +32,35 @@ else
     echo "  ⚠️ claude CLI install failed (the VS Code extension ships its own copy, so chat still works)"
 fi
 
+# ── Auth bootstrap: fetch artifact if no secrets were injected at codespace creation ─
+# gh is always pre-authenticated in every codespace (regardless of which repo),
+# so we can pull the daily-updated artifact from the private dotfiles repo as a
+# fallback when the new repo hasn't been granted the Codespace secrets yet.
+if [ -z "${CLAUDE_CREDENTIALS_JSON:-}" ] && [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] \
+   && command -v gh >/dev/null 2>&1; then
+    echo "🔑 No Claude auth secrets in env — trying artifact bootstrap from dotfiles repo..."
+    _ARTDIR=$(mktemp -d)
+    _LATEST=$(gh run list --repo sylt613/dotfiles --workflow grant-secrets.yml \
+        --status success --json databaseId --jq '.[0].databaseId' 2>/dev/null)
+    if [ -n "$_LATEST" ] && \
+       gh run download "$_LATEST" -n cs-auth --repo sylt613/dotfiles \
+           --dir "$_ARTDIR" 2>/dev/null; then
+        if [ -f "$_ARTDIR/creds_b64.txt" ]; then
+            export CLAUDE_CREDENTIALS_JSON=$(cat "$_ARTDIR/creds_b64.txt")
+            echo "  ✅ Bootstrapped CLAUDE_CREDENTIALS_JSON from artifact (run $_LATEST)"
+        fi
+        if [ -f "$_ARTDIR/oauth_token.txt" ]; then
+            export CLAUDE_CODE_OAUTH_TOKEN=$(cat "$_ARTDIR/oauth_token.txt")
+            echo "  ✅ Bootstrapped CLAUDE_CODE_OAUTH_TOKEN from artifact"
+        fi
+        [ -z "${CLAUDE_CREDENTIALS_JSON:-}${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && \
+            echo "  ⚠️ Artifact found but contained no token files"
+    else
+        echo "  ▫️ Artifact bootstrap skipped (no successful grant-secrets run found yet)"
+    fi
+    rm -rf "$_ARTDIR"
+fi
+
 # ── Auth from Codespaces secrets ─────────────────────────────────────────────
 echo "🔑 Claude auth..."
 bash "$DOTFILES_DIR/claude-auth.sh"

@@ -12,10 +12,34 @@ _ai_dir="${AI_DOTFILES_DIR:-}"
 if [ -n "$_ai_dir" ] && { [ -n "${CODESPACES:-}" ] || [ -n "${CODESPACE_NAME:-}" ] || [ -n "${AI_DOTFILES_FORCE:-}" ]; }; then
     _ai_state="$HOME/.dotfiles-state"
 
-    if [ ! -f "$_ai_state/auth-configured" ] \
-       && { [ -n "${CLAUDE_CREDENTIALS_JSON:-}" ] || [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; } \
-       && [ -f "$_ai_dir/claude-auth.sh" ]; then
-        bash "$_ai_dir/claude-auth.sh" >>"$HOME/.dotfiles-install.log" 2>&1
+    if [ ! -f "$_ai_state/auth-configured" ] && [ -f "$_ai_dir/claude-auth.sh" ]; then
+        if [ -n "${CLAUDE_CREDENTIALS_JSON:-}" ] || [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+            bash "$_ai_dir/claude-auth.sh" >>"$HOME/.dotfiles-install.log" 2>&1
+        elif command -v gh >/dev/null 2>&1 \
+             && [ ! -f "$_ai_state/artifact-bootstrap-$(date +%Y%m%d)" ]; then
+            # Artifact bootstrap: fetch the daily-saved token from dotfiles repo.
+            # gh is pre-authenticated in every codespace. Rate-limited to once per day.
+            touch "$_ai_state/artifact-bootstrap-$(date +%Y%m%d)"
+            (
+                _d=$(mktemp -d)
+                _run=$(gh run list --repo sylt613/dotfiles --workflow grant-secrets.yml \
+                    --status success --json databaseId --jq '.[0].databaseId' 2>/dev/null)
+                if [ -n "$_run" ] && \
+                   gh run download "$_run" -n cs-auth --repo sylt613/dotfiles \
+                       --dir "$_d" 2>/dev/null; then
+                    [ -f "$_d/creds_b64.txt" ] && \
+                        export CLAUDE_CREDENTIALS_JSON=$(cat "$_d/creds_b64.txt")
+                    [ -f "$_d/oauth_token.txt" ] && \
+                        export CLAUDE_CODE_OAUTH_TOKEN=$(cat "$_d/oauth_token.txt")
+                    if [ -n "${CLAUDE_CREDENTIALS_JSON:-}${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+                        bash "$_ai_dir/claude-auth.sh" >>"$HOME/.dotfiles-install.log" 2>&1 \
+                            && echo "[session-init] artifact bootstrap auth done" \
+                                >> "$HOME/.dotfiles-install.log"
+                    fi
+                fi
+                rm -rf "$_d"
+            ) &
+        fi
     fi
 
     if [ ! -f "$_ai_state/extensions-ok" ] && [ -f "$_ai_dir/vscode-setup.sh" ] \
