@@ -225,6 +225,19 @@ if [ -n "\${GH_CODESPACE_PAT:-}" ]; then export GH_TOKEN="\$GH_CODESPACE_PAT"; f
 export AI_DOTFILES_DIR="$DOTFILES_DIR"
 # claude-tui: attach to the persistent full-auto Claude session (starts it if needed)
 claude-tui() { [ -f "\$AI_DOTFILES_DIR/claude-tmux.sh" ] && bash "\$AI_DOTFILES_DIR/claude-tmux.sh" >/dev/null 2>&1; tmux attach -t "\${CLAUDE_TMUX_SESSION:-claude}"; }
+# claude: route the bare interactive TUI through a PER-REPO, persistent tmux
+# session in full-auto (bypassPermissions). It stays running when you exit or
+# close the terminal — type 'claude' again in the same repo to reattach.
+# Utility/piped/arg'd calls (claude --version, claude -p, nested-in-tmux) pass
+# straight through to the real CLI. Escape hatch: CLAUDE_NO_TMUX=1.
+claude() {
+    local real; real="\$(command -v claude 2>/dev/null)"
+    if [ -z "\$real" ] || ! command -v tmux >/dev/null 2>&1 || [ -n "\${TMUX:-}" ] || [ -n "\${CLAUDE_NO_TMUX:-}" ] || [ "\$#" -gt 0 ] || [ ! -t 1 ]; then command claude "\$@"; return; fi
+    local root; root="\$(git rev-parse --show-toplevel 2>/dev/null)"; [ -n "\$root" ] || root="\$PWD"
+    local sess="claude-\$(printf '%s' "\$(basename "\$root")" | tr -c 'A-Za-z0-9_-' '-')"
+    tmux has-session -t "\$sess" 2>/dev/null || tmux new-session -d -s "\$sess" -c "\$root" "\$real --permission-mode bypassPermissions; exec bash -i"
+    tmux attach -t "\$sess"
+}
 # claude-fable: quick full-auto Claude on the Fable model (not in the /model picker; default stays Opus)
 claude-fable() { claude --model fable "\$@"; }
 if [ -f "\$AI_DOTFILES_DIR/session-init.sh" ]; then . "\$AI_DOTFILES_DIR/session-init.sh"; fi
