@@ -225,40 +225,63 @@ if [ -n "\${GH_CODESPACE_PAT:-}" ]; then export GH_TOKEN="\$GH_CODESPACE_PAT"; f
 export AI_DOTFILES_DIR="$DOTFILES_DIR"
 # claude-tui: attach to the persistent full-auto Claude session (starts it if needed)
 claude-tui() { [ -f "\$AI_DOTFILES_DIR/claude-tmux.sh" ] && bash "\$AI_DOTFILES_DIR/claude-tmux.sh" >/dev/null 2>&1; tmux attach -t "\${CLAUDE_TMUX_SESSION:-claude}"; }
-# claude: bare interactive \`claude\` shows a PICKER of the running full-auto tmux
-# sessions (bypassPermissions) so you can resume ANY of them across repos, or
-# start a fresh one for the current repo. Sessions stay running when you exit or
-# close the terminal. Enter = this repo's session (created if needed); a number
-# attaches that session; 'n' = new for this repo; 'q' = quit. When no sessions
-# exist yet it skips the menu and just opens this repo's.
+# claude: bare interactive \`claude\` opens a PICKER of the running full-auto tmux
+# sessions (bypassPermissions). From it you can attach any session (across repos),
+# spin up UNLIMITED new sessions for the current repo (claude-<repo>, then -2, -3,
+# …), or kill sessions you're done with — the menu loops so you can manage them
+# before attaching. Enter = this repo's base session (created if needed); a
+# number attaches it; 'n' = brand-new session; 'k' = kill one; 'q' = quit. When
+# no sessions exist yet it skips the menu and just opens this repo's. Sessions
+# stay running when you exit or close the terminal.
 # Utility/piped/arg'd calls (claude --version, claude -p, nested-in-tmux) pass
 # straight through to the real CLI. Escape hatch: CLAUDE_NO_TMUX=1.
 claude() {
     local real; real="\$(command -v claude 2>/dev/null)"
     if [ -z "\$real" ] || ! command -v tmux >/dev/null 2>&1 || [ -n "\${TMUX:-}" ] || [ -n "\${CLAUDE_NO_TMUX:-}" ] || [ "\$#" -gt 0 ] || [ ! -t 1 ]; then command claude "\$@"; return; fi
     local root; root="\$(git rev-parse --show-toplevel 2>/dev/null)"; [ -n "\$root" ] || root="\$PWD"
-    local sess="claude-\$(printf '%s' "\$(basename "\$root")" | tr -c 'A-Za-z0-9_-' '-')"
-    local list; list="\$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^claude' | sort)"
-    if [ -z "\$list" ]; then
-        tmux has-session -t "\$sess" 2>/dev/null || tmux new-session -d -s "\$sess" -c "\$root" "\$real --permission-mode bypassPermissions; exec bash -i"
-        tmux attach -t "\$sess"; return
-    fi
-    local n; n="\$(printf '%s\n' "\$list" | grep -c .)"
-    printf '\nClaude tmux sessions:\n'
-    printf '%s\n' "\$list" | awk -v cur="\$sess" '{ printf "  %d) %s%s\n", NR, \$0, (\$0==cur ? "  (this repo)" : "") }'
-    printf '  n) new session for THIS repo (%s)\n' "\$sess"
-    printf '  q) quit\n'
-    printf 'Attach which? [1-%s / n / q]  (Enter = this repo): ' "\$n"
-    local choice; read -r choice
-    local target=""
-    case "\$choice" in
-        q|Q) return ;;
-        n|N|'') target="\$sess" ;;
-        *[!0-9]*) echo "claude: invalid choice '\$choice'"; return 1 ;;
-        *) if [ "\$choice" -ge 1 ] && [ "\$choice" -le "\$n" ]; then target="\$(printf '%s\n' "\$list" | sed -n "\${choice}p")"; else echo "claude: choice out of range"; return 1; fi ;;
-    esac
-    tmux has-session -t "\$target" 2>/dev/null || tmux new-session -d -s "\$target" -c "\$root" "\$real --permission-mode bypassPermissions; exec bash -i"
-    tmux attach -t "\$target"
+    local base; base="claude-\$(printf '%s' "\$(basename "\$root")" | tr -c 'A-Za-z0-9_-' '-')"
+    local cmd="\$real --permission-mode bypassPermissions; exec bash -i"
+    while true; do
+        local list; list="\$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^claude' | sort)"
+        if [ -z "\$list" ]; then
+            tmux new-session -d -s "\$base" -c "\$root" "\$cmd"
+            tmux attach -t "\$base"; return
+        fi
+        local n; n="\$(printf '%s\n' "\$list" | grep -c .)"
+        printf '\nClaude tmux sessions:\n'
+        printf '%s\n' "\$list" | awk -v cur="\$base" '{ printf "  %d) %s%s\n", NR, \$0, (\$0==cur || \$0 ~ "^" cur "-[0-9]+\$" ? "  (this repo)" : "") }'
+        printf '  n) NEW session for this repo\n  k) kill a session\n  q) quit\n'
+        printf 'Choose [1-%s / n / k / q]  (Enter = this repo): ' "\$n"
+        local choice; read -r choice
+        case "\$choice" in
+            q|Q) return ;;
+            '') if printf '%s\n' "\$list" | grep -qx "\$base"; then tmux attach -t "\$base"; else tmux new-session -d -s "\$base" -c "\$root" "\$cmd"; tmux attach -t "\$base"; fi; return ;;
+            n|N)
+                local uniq="\$base" i=2
+                while printf '%s\n' "\$list" | grep -qx "\$uniq"; do uniq="\$base-\$i"; i=\$((i+1)); done
+                tmux new-session -d -s "\$uniq" -c "\$root" "\$cmd"
+                tmux attach -t "\$uniq"; return ;;
+            k|K)
+                printf 'Kill which? [1-%s] (blank = cancel): ' "\$n"
+                local kn; read -r kn
+                [ -z "\$kn" ] && continue
+                case "\$kn" in *[!0-9]*) echo "claude: not a number"; continue ;; esac
+                if [ "\$kn" -ge 1 ] && [ "\$kn" -le "\$n" ]; then
+                    local victim; victim="\$(printf '%s\n' "\$list" | sed -n "\${kn}p")"
+                    tmux kill-session -t "\$victim" 2>/dev/null && echo "killed: \$victim" || echo "claude: could not kill \$victim"
+                else
+                    echo "claude: out of range"
+                fi
+                continue ;;
+            *[!0-9]*) echo "claude: invalid choice '\$choice'"; continue ;;
+            *)
+                if [ "\$choice" -ge 1 ] && [ "\$choice" -le "\$n" ]; then
+                    tmux attach -t "\$(printf '%s\n' "\$list" | sed -n "\${choice}p")"; return
+                else
+                    echo "claude: out of range"; continue
+                fi ;;
+        esac
+    done
 }
 # claude-fable: quick full-auto Claude on the Fable model (not in the /model picker; default stays Opus)
 claude-fable() { claude --model fable "\$@"; }
