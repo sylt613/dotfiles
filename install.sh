@@ -225,9 +225,12 @@ if [ -n "\${GH_CODESPACE_PAT:-}" ]; then export GH_TOKEN="\$GH_CODESPACE_PAT"; f
 export AI_DOTFILES_DIR="$DOTFILES_DIR"
 # claude-tui: attach to the persistent full-auto Claude session (starts it if needed)
 claude-tui() { [ -f "\$AI_DOTFILES_DIR/claude-tmux.sh" ] && bash "\$AI_DOTFILES_DIR/claude-tmux.sh" >/dev/null 2>&1; tmux attach -t "\${CLAUDE_TMUX_SESSION:-claude}"; }
-# claude: route the bare interactive TUI through a PER-REPO, persistent tmux
-# session in full-auto (bypassPermissions). It stays running when you exit or
-# close the terminal — type 'claude' again in the same repo to reattach.
+# claude: bare interactive \`claude\` shows a PICKER of the running full-auto tmux
+# sessions (bypassPermissions) so you can resume ANY of them across repos, or
+# start a fresh one for the current repo. Sessions stay running when you exit or
+# close the terminal. Enter = this repo's session (created if needed); a number
+# attaches that session; 'n' = new for this repo; 'q' = quit. When no sessions
+# exist yet it skips the menu and just opens this repo's.
 # Utility/piped/arg'd calls (claude --version, claude -p, nested-in-tmux) pass
 # straight through to the real CLI. Escape hatch: CLAUDE_NO_TMUX=1.
 claude() {
@@ -235,8 +238,27 @@ claude() {
     if [ -z "\$real" ] || ! command -v tmux >/dev/null 2>&1 || [ -n "\${TMUX:-}" ] || [ -n "\${CLAUDE_NO_TMUX:-}" ] || [ "\$#" -gt 0 ] || [ ! -t 1 ]; then command claude "\$@"; return; fi
     local root; root="\$(git rev-parse --show-toplevel 2>/dev/null)"; [ -n "\$root" ] || root="\$PWD"
     local sess="claude-\$(printf '%s' "\$(basename "\$root")" | tr -c 'A-Za-z0-9_-' '-')"
-    tmux has-session -t "\$sess" 2>/dev/null || tmux new-session -d -s "\$sess" -c "\$root" "\$real --permission-mode bypassPermissions; exec bash -i"
-    tmux attach -t "\$sess"
+    local list; list="\$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^claude' | sort)"
+    if [ -z "\$list" ]; then
+        tmux has-session -t "\$sess" 2>/dev/null || tmux new-session -d -s "\$sess" -c "\$root" "\$real --permission-mode bypassPermissions; exec bash -i"
+        tmux attach -t "\$sess"; return
+    fi
+    local n; n="\$(printf '%s\n' "\$list" | grep -c .)"
+    printf '\nClaude tmux sessions:\n'
+    printf '%s\n' "\$list" | awk -v cur="\$sess" '{ printf "  %d) %s%s\n", NR, \$0, (\$0==cur ? "  (this repo)" : "") }'
+    printf '  n) new session for THIS repo (%s)\n' "\$sess"
+    printf '  q) quit\n'
+    printf 'Attach which? [1-%s / n / q]  (Enter = this repo): ' "\$n"
+    local choice; read -r choice
+    local target=""
+    case "\$choice" in
+        q|Q) return ;;
+        n|N|'') target="\$sess" ;;
+        *[!0-9]*) echo "claude: invalid choice '\$choice'"; return 1 ;;
+        *) if [ "\$choice" -ge 1 ] && [ "\$choice" -le "\$n" ]; then target="\$(printf '%s\n' "\$list" | sed -n "\${choice}p")"; else echo "claude: choice out of range"; return 1; fi ;;
+    esac
+    tmux has-session -t "\$target" 2>/dev/null || tmux new-session -d -s "\$target" -c "\$root" "\$real --permission-mode bypassPermissions; exec bash -i"
+    tmux attach -t "\$target"
 }
 # claude-fable: quick full-auto Claude on the Fable model (not in the /model picker; default stays Opus)
 claude-fable() { claude --model fable "\$@"; }
