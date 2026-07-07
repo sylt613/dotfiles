@@ -225,19 +225,25 @@ if [ -n "\${GH_CODESPACE_PAT:-}" ]; then export GH_TOKEN="\$GH_CODESPACE_PAT"; f
 export AI_DOTFILES_DIR="$DOTFILES_DIR"
 # claude-tui: attach to the persistent full-auto Claude session (starts it if needed)
 claude-tui() { [ -f "\$AI_DOTFILES_DIR/claude-tmux.sh" ] && bash "\$AI_DOTFILES_DIR/claude-tmux.sh" >/dev/null 2>&1; tmux attach -t "\${CLAUDE_TMUX_SESSION:-claude}"; }
+# _claude_go: enter a session — attach from a normal shell, or (when we're
+# already inside tmux) switch the current client to it, since tmux refuses to
+# nest an attach inside an attach. Lets the picker work both outside AND inside
+# tmux (so you can hop between sessions from within one).
+_claude_go() { if [ -n "\${TMUX:-}" ]; then tmux switch-client -t "\$1"; else tmux attach -t "\$1"; fi; }
 # claude: bare interactive \`claude\` opens a PICKER of the running full-auto tmux
-# sessions (bypassPermissions). From it you can attach any session (across repos),
-# spin up UNLIMITED new sessions for the current repo (claude-<repo>, then -2, -3,
-# …), or kill sessions you're done with — the menu loops so you can manage them
-# before attaching. Enter = this repo's base session (created if needed); a
-# number attaches it; 'n' = brand-new session; 'k' = kill one; 'q' = quit. When
-# no sessions exist yet it skips the menu and just opens this repo's. Sessions
-# stay running when you exit or close the terminal.
-# Utility/piped/arg'd calls (claude --version, claude -p, nested-in-tmux) pass
-# straight through to the real CLI. Escape hatch: CLAUDE_NO_TMUX=1.
+# sessions (bypassPermissions). From it you can attach/switch to any session
+# (across repos), spin up UNLIMITED new sessions for the current repo
+# (claude-<repo>, then -2, -3, …), or kill sessions you're done with — the menu
+# loops so you can manage them before entering. Enter = this repo's base session
+# (created if needed); a number enters it; 'n' = brand-new session; 'k' = kill
+# one; 'q' = quit. When no sessions exist yet it skips the menu and just opens
+# this repo's. Works inside tmux too (switches the client). Sessions stay running
+# when you exit or close the terminal.
+# Utility/piped/arg'd calls (claude --version, claude -p) pass straight through
+# to the real CLI. Escape hatch: CLAUDE_NO_TMUX=1.
 claude() {
     local real; real="\$(command -v claude 2>/dev/null)"
-    if [ -z "\$real" ] || ! command -v tmux >/dev/null 2>&1 || [ -n "\${TMUX:-}" ] || [ -n "\${CLAUDE_NO_TMUX:-}" ] || [ "\$#" -gt 0 ] || [ ! -t 1 ]; then command claude "\$@"; return; fi
+    if [ -z "\$real" ] || ! command -v tmux >/dev/null 2>&1 || [ -n "\${CLAUDE_NO_TMUX:-}" ] || [ "\$#" -gt 0 ] || [ ! -t 1 ]; then command claude "\$@"; return; fi
     local root; root="\$(git rev-parse --show-toplevel 2>/dev/null)"; [ -n "\$root" ] || root="\$PWD"
     local base; base="claude-\$(printf '%s' "\$(basename "\$root")" | tr -c 'A-Za-z0-9_-' '-')"
     local cmd="\$real --permission-mode bypassPermissions; exec bash -i"
@@ -245,7 +251,7 @@ claude() {
         local list; list="\$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^claude' | sort)"
         if [ -z "\$list" ]; then
             tmux new-session -d -s "\$base" -c "\$root" "\$cmd"
-            tmux attach -t "\$base"; return
+            _claude_go "\$base"; return
         fi
         local n; n="\$(printf '%s\n' "\$list" | grep -c .)"
         printf '\nClaude tmux sessions:\n'
@@ -255,12 +261,12 @@ claude() {
         local choice; read -r choice
         case "\$choice" in
             q|Q) return ;;
-            '') if printf '%s\n' "\$list" | grep -qx "\$base"; then tmux attach -t "\$base"; else tmux new-session -d -s "\$base" -c "\$root" "\$cmd"; tmux attach -t "\$base"; fi; return ;;
+            '') printf '%s\n' "\$list" | grep -qx "\$base" || tmux new-session -d -s "\$base" -c "\$root" "\$cmd"; _claude_go "\$base"; return ;;
             n|N)
                 local uniq="\$base" i=2
                 while printf '%s\n' "\$list" | grep -qx "\$uniq"; do uniq="\$base-\$i"; i=\$((i+1)); done
                 tmux new-session -d -s "\$uniq" -c "\$root" "\$cmd"
-                tmux attach -t "\$uniq"; return ;;
+                _claude_go "\$uniq"; return ;;
             k|K)
                 printf 'Kill which? [1-%s] (blank = cancel): ' "\$n"
                 local kn; read -r kn
@@ -276,7 +282,7 @@ claude() {
             *[!0-9]*) echo "claude: invalid choice '\$choice'"; continue ;;
             *)
                 if [ "\$choice" -ge 1 ] && [ "\$choice" -le "\$n" ]; then
-                    tmux attach -t "\$(printf '%s\n' "\$list" | sed -n "\${choice}p")"; return
+                    _claude_go "\$(printf '%s\n' "\$list" | sed -n "\${choice}p")"; return
                 else
                     echo "claude: out of range"; continue
                 fi ;;
