@@ -179,19 +179,18 @@ fi
 echo "🧩 VS Code extensions: launching background installer (log: ~/.dotfiles-vscode-setup.log)"
 ( nohup bash "$DOTFILES_DIR/vscode-setup.sh" >/dev/null 2>&1 & ) 2>/dev/null
 
-# ── Idle timeout + smart keep-alive ──────────────────────────────────────────
+# ── Smart keep-alive ─────────────────────────────────────────────────────────
+# NOTE: there used to be a PATCH /user/codespaces/{name} here setting
+# idle_timeout_minutes. That endpoint does not accept the field — it answers 200
+# and drops it, so the call was a silent no-op. A codespace's idle timeout is
+# fixed at CREATION and immutable thereafter. Set the default you want for new
+# codespaces at github.com/settings/codespaces (max 240 min); the keep-alive
+# below is what protects an already-running box.
 echo "⏰ Keep-alive..."
 if [ -n "${CODESPACE_NAME:-}" ] && [ -n "${GH_CODESPACE_PAT:-}" ]; then
-    curl -s -o /dev/null -X PATCH \
-        -H "Authorization: Bearer $GH_CODESPACE_PAT" \
-        -H "Accept: application/vnd.github+json" \
-        -H "Content-Type: application/json" \
-        "https://api.github.com/user/codespaces/$CODESPACE_NAME" \
-        -d '{"idle_timeout_minutes":15}' \
-        && echo "  ✅ idle timeout baseline set to 15 min" \
-        || echo "  ⚠️ could not set idle timeout"
-    ( nohup bash "$DOTFILES_DIR/cs_keepalive.sh" >>/tmp/.cs_keepalive.log 2>&1 & ) 2>/dev/null
-    echo "  ✅ smart keep-alive started (240 min while Claude works / 15 min idle)"
+    ( nohup bash "$DOTFILES_DIR/cs_keepalive.sh" >/dev/null 2>&1 & ) 2>/dev/null
+    echo "  ✅ smart keep-alive started (holds a client session while Claude works)"
+    echo "     log: ~/.cs-keepalive.log"
 else
     echo "  ▫️ GH_CODESPACE_PAT not set — keep-alive inactive (add it at github.com/settings/codespaces)"
 fi

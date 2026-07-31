@@ -72,11 +72,21 @@ workflow — run it to re-verify any time).
      `~/.claude.json`** (claude-tmux.sh writes it, merge-only, `sys.exit(3)`
      non-clobber per invariant 5). The folder-trust dialog ("Is this a project
      you trust?") is a separate gate that nothing else satisfies.
-   The keep-alive is tmux-aware: "Claude is working" = a transcript `.jsonl`
-   write in the last 2 min OR the Claude tmux pane printed output recently
-   (`#{window_activity}`). An idle Claude pane's `window_activity` is frozen, so
-   idle correctly drops back to the 15-min timeout — don't "improve" this into
-   keeping the box awake whenever the session merely *exists*.
+   "Stay awake" mirrors the Fly watchdog at
+   `flyio-instance-control/v1-claude/keepalive.sh` — force flag, OR Claude
+   processes burned >= `BUSY_JIFFIES` of CPU in the last poll, OR a transcript
+   `.jsonl` write within the grace window. A Claude process must exist for the
+   transcript signal to count (else a stale file pins the box).
+   Two of the Fly script's four signals are deliberately NOT ported, because
+   both were measured on a live codespace and neither discriminates here:
+   `any_attached` (all 4 tmux sessions report `session_attached=1` at all times)
+   and `last_tmux_activity` (newest pane activity reads 0s ago constantly, the
+   TUI repaints). Porting either would pin a 4-core box at ~$0.36/hr forever.
+   (An earlier version of this file claimed an idle pane's `window_activity` is
+   frozen. It is not — measured.)
+   `BUSY_JIFFIES` defaults to 3% average CPU, not Fly's ~1%, for the same
+   repaint reason. Every decision logs its CPU delta so it can be recalibrated
+   from real data.
    ⚠️ **Do not "verify" the no-dialog launch locally inside a Claude session.**
    A Claude you spawn inherits `CLAUDE_CODE_CHILD_SESSION=1`/`CLAUDECODE=1` and
    skips the bypass warning, so every local repro looks clean and lies. The only
@@ -91,13 +101,53 @@ workflow — run it to re-verify any time).
 - `session-init.sh` — `.bashrc` hook: self-heals auth/extension/keep-alive/tmux
 - `claude-tmux.sh` — starts (and re-creates after stop/start) the detached
   full-auto Claude tmux session; pre-trusts the workspace (see invariant 8)
-- `cs_keepalive.sh` — idle timeout 240 min while Claude works (transcript write
-  OR tmux pane activity), 15 min idle
+- `cs_keepalive.sh` — holds a real client session (`gh codespace ssh` to self)
+  while Claude works; releases it when idle so the box can stop. See the
+  keep-alive invariant below.
 - `ai-check` — in-codespace diagnostic; `✅ READY` or says exactly what's wrong
 - `setup-secrets.sh` — run by the USER on their machine/working codespace:
   uploads the token to user Codespaces secrets + grants all repos
 - `devcontainer-template/devcontainer.json` — per-repo option; GitHub installs
-  extensions natively, postCreate runs this bootstrap even without the toggle
+  extensions natively, postCreate runs this bootstrap even without the toggle,
+  postStart restarts the keep-alive after every stop/start
+
+## Keep-alive invariant — a codespace's idle timeout is IMMUTABLE
+
+`idle_timeout_minutes` is fixed when the codespace is **created** and cannot be
+changed afterwards. `PATCH /user/codespaces/{name}` does not accept the field:
+it returns **200 and silently ignores it** (verified 2026-07-31 — PATCH 200,
+follow-up GET still read 30). `gh codespace edit` has no `--idle-timeout` flag.
+Any code that "sets the timeout at runtime" is a no-op; the old keep-alive did
+exactly this and protected nothing for months because `curl` exits 0 on a 200.
+
+What actually defers the idle stop is a **live client connection**. Background
+processes do not count — GitHub's docs say terminal output counts as activity,
+but staff have confirmed that only holds while a client is attached, which is
+why closing the browser kills a box that is mid-build. So the keep-alive holds
+one: `gh codespace ssh` from the box to itself, printing a line every 30s.
+
+NOTE the difference from the Fly watchdog: Fly's timer is reset by an inbound
+request through its proxy, so a self-ping to its own hostname works. A
+codespace's timer does **not** respond to self-directed HTTP or to internal CPU
+load — only to a client session. Do not reason from one to the other.
+
+Verified twice on 2026-07-31:
+
+1. A/B on two throwaway codespaces created with a 5-minute timeout. The
+   control, left alone, went `ShuttingDown` at 4m56s and `Shutdown` at 5m57s.
+   The twin, holding a self-SSH session and never opened in a browser, stayed
+   `Available` 17m07s (3.4x) until deleted by hand.
+2. Better, unattended, on this real box (30-min timeout): held from 00:36 to
+   02:09 — 1h33m through three 30-min lease recycles. At 02:09:55 Claude went
+   quiet, the watchdog released, and the box then genuinely stopped (fresh boot
+   at 02:48). Held ⇒ alive past 3x the timeout; released ⇒ stopped ~30 min
+   later. That is the causal pair.
+
+Re-run one of those rather than trusting this paragraph if you change the
+mechanism.
+
+To change the timeout for **new** codespaces, set the account default at
+github.com/settings/codespaces (5–240 min). It does not affect existing ones.
 
 ## Testing — run before any push
 

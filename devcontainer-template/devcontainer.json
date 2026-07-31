@@ -27,5 +27,14 @@
     // Create-time, user secrets present: full dotfiles bootstrap (login,
     // bypassPermissions mode, keep-alive, ai-check). Cloned into $HOME so the
     // self-heal hook survives codespace stop/start.
-    "postCreateCommand": "git clone --depth 1 https://github.com/sylt613/dotfiles \"$HOME/.ai-dotfiles\" 2>/dev/null || git -C \"$HOME/.ai-dotfiles\" pull -q || true; bash \"$HOME/.ai-dotfiles/install.sh\" || true"
+    "postCreateCommand": "git clone --depth 1 https://github.com/sylt613/dotfiles \"$HOME/.ai-dotfiles\" 2>/dev/null || git -C \"$HOME/.ai-dotfiles\" pull -q || true; bash \"$HOME/.ai-dotfiles/install.sh\" || true",
+    // Start-time — runs on EVERY start, including the resume after an idle
+    // stop or a reboot. postCreateCommand does NOT re-run then, and the
+    // .bashrc self-heal only fires once a human opens a terminal, so without
+    // this the keep-alive stays dead exactly when it is needed. The script is
+    // a flock singleton and logs to ~/.cs-keepalive.log; `|| true` so a broken
+    // keep-alive can never block the codespace from starting.
+    // Tries the template clone first, then the account-level dotfiles path
+    // ($AI_DOTFILES_DIR, set when "Automatically install dotfiles" is on).
+    "postStartCommand": "for d in \"$HOME/.ai-dotfiles\" \"$AI_DOTFILES_DIR\" /workspaces/.codespaces/.persistedshare/dotfiles; do if [ -f \"$d/cs_keepalive.sh\" ]; then nohup bash \"$d/cs_keepalive.sh\" >/dev/null 2>&1 & break; fi; done; true"
 }

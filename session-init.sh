@@ -50,7 +50,11 @@ if [ -n "$_ai_dir" ] && { [ -n "${CODESPACES:-}" ] || [ -n "${CODESPACE_NAME:-}"
     if [ -n "${CODESPACE_NAME:-}" ] && [ -n "${GH_CODESPACE_PAT:-}" ] \
        && [ -f "$_ai_dir/cs_keepalive.sh" ] \
        && ! pgrep -f cs_keepalive >/dev/null 2>&1; then
-        ( nohup bash "$_ai_dir/cs_keepalive.sh" >>/tmp/.cs_keepalive.log 2>&1 & ) 2>/dev/null
+        # Belt-and-braces: postStartCommand (devcontainer-template) is the
+        # primary restart path after a stop/start; this covers codespaces whose
+        # repo has no .devcontainer. The script self-logs to ~/.cs-keepalive.log
+        # and is a flock singleton, so a double-launch is harmless.
+        ( nohup bash "$_ai_dir/cs_keepalive.sh" >/dev/null 2>&1 & ) 2>/dev/null
     fi
 
     # Re-create the persistent Claude tmux session if it's gone (stop/start
