@@ -105,6 +105,18 @@ workflow — run it to re-verify any time).
   while Claude works; releases it when idle so the box can stop. See the
   keep-alive invariant below.
 - `ai-check` — in-codespace diagnostic; `✅ READY` or says exactly what's wrong
+- `model-check` — scans every repo for pinned Claude model IDs and flags retired,
+  deprecated, and merely-superseded ones. Exits 1 when anything is stale, so it can
+  gate CI or a hook. Prefers the live Models API (needs `ANTHROPIC_API_KEY` or the
+  `ant` CLI) and falls back to a built-in table, saying which it used.
+  **Two things it deliberately does that look like over-engineering and are not:**
+  it prints the per-hop migration gotchas rather than just "bump this string" —
+  FlexVivid's 4.8→5 bump silently truncated output because thinking went from off
+  to on-by-default and `max_tokens` caps thinking plus the answer together; and its
+  ID regex is deliberately loose about legacy shapes, because tightening it once
+  dropped a **retired** `claude-3-5-sonnet-latest` that was live in
+  `outworq-screens/src/index.js`. A miss here is far worse than a false positive —
+  a superseded model keeps working, so nothing else will ever tell you.
 - `setup-secrets.sh` — run by the USER on their machine/working codespace:
   uploads the token to user Codespaces secrets + grants all repos
 - `devcontainer-template/devcontainer.json` — per-repo option; GitHub installs

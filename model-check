@@ -1,0 +1,382 @@
+#!/usr/bin/env python3
+"""
+model-check — find Claude model IDs pinned across the repos and flag stale ones.
+
+WHY THIS EXISTS
+    On 2026-07-31 FlexVivid was still pinned to claude-opus-4-8 months after it
+    stopped being the newest Opus. Nothing anywhere would ever have said so: a
+    superseded model keeps working, so the pin just quietly rots. The owner's
+    words: "never use opus 4.8 anymore, now only 5 — must make some system to
+    always make sure all models latest."
+
+    The second half of the lesson is why this prints migration notes instead of
+    just a diff. Bumping that pin was NOT a string swap: the call passed no
+    `thinking` parameter, which meant no thinking on Opus 4.8 but *adaptive
+    thinking on by default* on Opus 5 — and max_tokens caps thinking and the
+    answer together. At max_tokens=1500 the reasoning would have eaten the
+    budget and the diagnosis JSON would have come back truncated, which the
+    parser reads as a malformed diagnosis rather than an error. A tool that
+    said "bump this string" and stopped there would have caused that outage.
+
+WHAT IT DOES
+    Scans every git repo under the workspace root for pinned Claude model IDs,
+    classifies each one, and reports what should change. Exits non-zero when
+    anything retired or deprecated is found, so it can gate CI or a hook.
+
+    Live check: if credentials are available it asks the Models API which
+    models actually exist right now, and that answer wins over the built-in
+    table. Without credentials it still works — the built-in table catches
+    retired and deprecated pins, which is the part that actually breaks — and
+    it says plainly that it could not check live.
+
+USAGE
+    model-check                 # report, exit 1 if anything is stale
+    model-check --quiet         # only print problems
+    model-check --json          # machine-readable
+    model-check <dir> [<dir>…]  # scan specific paths instead of the default
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from collections import defaultdict
+
+# ---------------------------------------------------------------------------
+# Built-in fallback table. The live Models API overrides this when reachable.
+#
+# Keep this in sync when a new model ships. It is a FALLBACK, not the source of
+# truth — anything here can be out of date, which is exactly the failure this
+# tool exists to catch, so the live lookup is always preferred.
+# Last verified against the bundled claude-api reference: 2026-07-31.
+# ---------------------------------------------------------------------------
+
+BEST = {
+    "opus": "claude-opus-5",
+    "sonnet": "claude-sonnet-5",
+    "haiku": "claude-haiku-4-5",
+    "fable": "claude-fable-5",
+}
+
+# Retired: these 404. Any pin here is a live outage waiting to be noticed.
+RETIRED = {
+    "claude-3-7-sonnet-20250219": "claude-sonnet-5",
+    "claude-3-5-haiku-20241022": "claude-haiku-4-5",
+    "claude-3-opus-20240229": "claude-opus-5",
+    "claude-3-5-sonnet-20241022": "claude-sonnet-5",
+    "claude-3-5-sonnet-20240620": "claude-sonnet-5",
+    "claude-3-sonnet-20240229": "claude-sonnet-5",
+    "claude-2.1": "claude-sonnet-5",
+    "claude-2.0": "claude-sonnet-5",
+}
+
+# Deprecated: still answer, but have an announced retirement date.
+DEPRECATED = {
+    "claude-3-haiku-20240307": ("claude-haiku-4-5", "retires 2026-04-19"),
+    "claude-opus-4-1": ("claude-opus-5", "retires 2026-08-05"),
+    "claude-opus-4-20250514": ("claude-opus-5", "retires 2026-06-15"),
+    "claude-sonnet-4-20250514": ("claude-sonnet-5", "retires 2026-06-15"),
+}
+
+# Superseded but still served. Not urgent, but not the best model either —
+# which is the thing the owner actually asked to be told about.
+SUPERSEDED = {
+    "claude-opus-4-8": "claude-opus-5",
+    "claude-opus-4-7": "claude-opus-5",
+    "claude-opus-4-6": "claude-opus-5",
+    "claude-opus-4-5": "claude-opus-5",
+    "claude-opus-4-0": "claude-opus-5",
+    "claude-sonnet-4-6": "claude-sonnet-5",
+    "claude-sonnet-4-5": "claude-sonnet-5",
+    "claude-sonnet-4-0": "claude-sonnet-5",
+}
+
+# Per-hop gotchas. A bump is rarely a pure string swap; these are the ones that
+# fail SILENTLY (truncation, a dropped parameter, an unread field) rather than
+# raising, because a loud 400 finds itself.
+MIGRATION_NOTES = {
+    "claude-opus-5": [
+        "Thinking is ON by default. On Opus 4.8/4.7, omitting `thinking` meant NO "
+        "thinking — so a call that never set it now thinks, and max_tokens caps "
+        "thinking AND the answer together. Raise max_tokens or the response "
+        "truncates mid-answer.",
+        "`thinking: {type:'disabled'}` + effort xhigh/max returns 400. Validated per "
+        "request, so audit every call site, not just the first.",
+        "Delete self-verification instructions ('double-check your answer'). Opus 5 "
+        "verifies on its own and the instruction causes over-verification.",
+    ],
+    "claude-sonnet-5": [
+        "Adaptive thinking is on by default (Sonnet 4.6 ran thinking-off when the "
+        "field was omitted) — revisit max_tokens.",
+        "New tokenizer: ~30% more tokens for the same text. Token budgets, context "
+        "limits and cost baselines all shift even though per-token price is the same.",
+        "Non-default temperature/top_p/top_k now return 400.",
+    ],
+    "claude-fable-5": [
+        "Thinking is always on — sending ANY `thinking` config (including "
+        "`disabled`) returns 400. Omit the parameter.",
+        "Requires 30-day data retention; ZDR orgs get 400 on every request.",
+        "Safety classifiers can return stop_reason='refusal' with HTTP 200 — check "
+        "stop_reason before reading content[0].",
+    ],
+}
+
+# Whole families that are gone. Catches the `-latest` aliases and any dated
+# snapshot in one rule, which an exact-ID list cannot do.
+RETIRED_PREFIXES = {
+    "claude-3-5-sonnet": "claude-sonnet-5",
+    "claude-3-7-sonnet": "claude-sonnet-5",
+    "claude-3-sonnet": "claude-sonnet-5",
+    "claude-3-opus": "claude-opus-5",
+    "claude-3-5-haiku": "claude-haiku-4-5",
+    "claude-2": "claude-sonnet-5",
+}
+
+# Match real model IDs without catching claude-code, claude-md-sync, or the
+# scratchpad paths (/tmp/claude-1000/…) that a naive \d+ pattern swallows —
+# the first run of this tool reported 65 of those as "unknown models".
+# Legacy IDs are therefore only matched in the two shapes that actually exist:
+# a dotted major.minor (claude-2.1) or a family-qualified one (claude-3-opus-…).
+# The legacy branch must allow a two-part major.minor BEFORE the family
+# (claude-3-5-sonnet-latest, claude-3-7-sonnet-20250219) as well as the
+# one-part form (claude-3-opus-20240229). Tightening this to a single digit
+# once silently dropped a RETIRED model that was live in outworq-screens —
+# a miss is far worse here than a false positive.
+MODEL_RE = re.compile(
+    r"\b(?:anthropic\.)?"
+    r"(claude-(?:opus|sonnet|haiku|fable|mythos)-[0-9][0-9a-z.\-]*"
+    r"|claude-[0-9](?:-[0-9])?-(?:opus|sonnet|haiku)[0-9a-z.\-]*"
+    r"|claude-[0-9]+\.[0-9]+)"
+)
+
+DATE_SUFFIX_RE = re.compile(r"-\d{8}$")
+
+
+def normalize(model):
+    """Fold the spelling variants that mean the same model.
+
+    Docs write `claude-opus-4.5`, code writes `claude-opus-4-5`; aliases end in
+    `-latest`; full IDs carry a `-20251001` date. All three must classify the
+    same as the canonical ID or the report fills with false 'unknown's.
+    """
+    m = model
+    if m.endswith("-latest"):
+        m = m[: -len("-latest")]
+    m = DATE_SUFFIX_RE.sub("", m)
+    # `claude-opus-4.5` -> `claude-opus-4-5`, leaving legacy `claude-2.1` alone.
+    if re.match(r"^claude-(opus|sonnet|haiku|fable|mythos)-", m):
+        m = m.replace(".", "-")
+    return m
+
+SKIP_DIRS = {
+    ".git", "node_modules", ".venv", ".venv12", "venv", "site-packages",
+    "dist", "build", ".next", ".open-next", ".wrangler", "vendor",
+    "__pycache__", ".mypy_cache", ".pytest_cache", ".cache",
+}
+SKIP_FILE_RE = re.compile(r"(package-lock\.json|\.min\.(js|css)|\.lock|\.map)$")
+TEXT_EXT = {
+    ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".sh", ".rb", ".go",
+    ".java", ".cs", ".php", ".rs", ".yml", ".yaml", ".toml", ".json", ".jsonc",
+    ".md", ".txt", ".env", ".tf", ".sql",
+}
+# A stale pin in prose is worth knowing about but won't break a request.
+DOC_EXT = {".md", ".txt"}
+
+
+def repos(roots):
+    """Yield directories to scan: each git repo under each root, or the root."""
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        if os.path.isdir(os.path.join(root, ".git")):
+            yield root
+            continue
+        found = False
+        try:
+            entries = sorted(os.listdir(root))
+        except OSError:
+            continue
+        for name in entries:
+            path = os.path.join(root, name)
+            if os.path.isdir(os.path.join(path, ".git")):
+                yield path
+                found = True
+        if not found:
+            yield root
+
+
+def scan(directory):
+    """Return [(path, lineno, model_id, is_doc)] for every model ID found."""
+    hits = []
+    for dirpath, dirnames, filenames in os.walk(directory):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        for fn in filenames:
+            ext = os.path.splitext(fn)[1].lower()
+            if ext not in TEXT_EXT or SKIP_FILE_RE.search(fn):
+                continue
+            path = os.path.join(dirpath, fn)
+            # Don't report our own reference table as a finding.
+            if os.path.realpath(path) == os.path.realpath(__file__):
+                continue
+            try:
+                if os.path.getsize(path) > 2_000_000:
+                    continue
+                with open(path, "r", errors="replace") as fh:
+                    for n, line in enumerate(fh, 1):
+                        if "claude-" not in line:
+                            continue
+                        for m in MODEL_RE.finditer(line):
+                            hits.append((path, n, m.group(1), ext in DOC_EXT))
+            except OSError:
+                continue
+    return hits
+
+
+def live_models():
+    """Ask the API which models exist now. Returns (ids, note)."""
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    headers = {"anthropic-version": "2023-06-01"}
+    if key:
+        headers["x-api-key"] = key
+    else:
+        try:
+            token = subprocess.run(
+                ["ant", "auth", "print-credentials", "--access-token"],
+                capture_output=True, text=True, timeout=20,
+            )
+            if token.returncode != 0 or not token.stdout.strip():
+                return None, "no credentials (set ANTHROPIC_API_KEY or run `ant auth login`)"
+            headers["authorization"] = "Bearer " + token.stdout.strip()
+            headers["anthropic-beta"] = "oauth-2025-04-20"
+        except (OSError, subprocess.SubprocessError):
+            return None, "no credentials (set ANTHROPIC_API_KEY or install the `ant` CLI)"
+
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/models?limit=100", headers=headers
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            data = json.load(resp)
+    except (urllib.error.URLError, urllib.error.HTTPError, ValueError, OSError) as e:
+        return None, f"lookup failed ({type(e).__name__})"
+    ids = {m["id"] for m in data.get("data", []) if "id" in m}
+    return (ids, "live") if ids else (None, "lookup returned no models")
+
+
+def classify(model, live_ids):
+    """-> (severity, replacement, reason). severity: retired|deprecated|stale|ok|unknown
+
+    Exact IDs win over normalized ones, so a dated snapshot that is explicitly
+    retired (claude-3-5-sonnet-20241022) is not silently folded into a live
+    family by the date-stripping in normalize().
+    """
+    # A bare major ("claude-sonnet-4") is the `-0` alias spelled loosely.
+    norm0 = normalize(model)
+    candidates = [model, norm0]
+    if re.match(r"^claude-(opus|sonnet|haiku)-[0-9]+$", norm0):
+        candidates.append(norm0 + "-0")
+
+    for candidate in candidates:
+        if candidate in RETIRED:
+            return "retired", RETIRED[candidate], "retired — this ID 404s"
+        if candidate in DEPRECATED:
+            repl, when = DEPRECATED[candidate]
+            return "deprecated", repl, when
+        if candidate in SUPERSEDED:
+            return "stale", SUPERSEDED[candidate], "superseded by a newer model"
+        if candidate in BEST.values():
+            return "ok", None, "current"
+
+    # Whole-family retirement — catches `-latest` aliases and stray snapshots.
+    norm = normalize(model)
+    for prefix, repl in RETIRED_PREFIXES.items():
+        if norm == prefix or norm.startswith(prefix + "-"):
+            return "retired", repl, "retired family — this ID 404s"
+
+    # Not in the table. A live lookup settles it; without one, say so honestly
+    # rather than guessing in either direction.
+    if live_ids is not None:
+        if model in live_ids or norm in live_ids:
+            return "ok", None, "current per the Models API"
+        return "retired", None, "not returned by the Models API — likely retired"
+    return "unknown", None, "not in the built-in table; could not check live"
+
+
+ORDER = {"retired": 0, "deprecated": 1, "stale": 2, "unknown": 3, "ok": 4}
+LABEL = {
+    "retired": "RETIRED — requests will fail",
+    "deprecated": "DEPRECATED — has a retirement date",
+    "stale": "NOT THE BEST MODEL",
+    "unknown": "UNKNOWN",
+    "ok": "current",
+}
+
+
+def main():
+    ap = argparse.ArgumentParser(add_help=True, description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("paths", nargs="*", default=None,
+                    help="directories to scan (default: $WORKSPACE_ROOT or /workspaces)")
+    ap.add_argument("--quiet", action="store_true", help="only print problems")
+    ap.add_argument("--json", action="store_true", dest="as_json")
+    args = ap.parse_args()
+
+    roots = args.paths or [os.environ.get("WORKSPACE_ROOT", "/workspaces")]
+    live_ids, live_note = live_models()
+
+    findings = defaultdict(list)
+    for repo in repos(roots):
+        for path, lineno, model, is_doc in scan(repo):
+            sev, repl, reason = classify(model, live_ids)
+            findings[(model, sev, repl, reason)].append((path, lineno, is_doc))
+
+    rows = []
+    for (model, sev, repl, reason), places in findings.items():
+        code_places = [p for p in places if not p[2]]
+        rows.append({
+            "model": model, "severity": sev, "replacement": repl, "reason": reason,
+            "occurrences": len(places), "code_occurrences": len(code_places),
+            "locations": [{"file": p, "line": n, "doc_only": d} for p, n, d in sorted(places)],
+        })
+    rows.sort(key=lambda r: (ORDER[r["severity"]], r["model"]))
+
+    if args.as_json:
+        print(json.dumps({"live_lookup": live_note, "findings": rows}, indent=2))
+    else:
+        print(f"model-check — model list: {live_note}")
+        if live_ids is None:
+            print("  ! could not verify against the API; using the built-in table, "
+                  "which may itself be out of date")
+        print()
+        if not rows:
+            print("No Claude model IDs found.")
+        for r in rows:
+            if args.quiet and r["severity"] == "ok":
+                continue
+            head = f"[{LABEL[r['severity']]}] {r['model']}"
+            if r["replacement"]:
+                head += f"  ->  {r['replacement']}"
+            print(head)
+            print(f"    {r['reason']}  ({r['occurrences']} occurrence(s), "
+                  f"{r['code_occurrences']} in code)")
+            for loc in r["locations"][:12]:
+                tag = " (docs)" if loc["doc_only"] else ""
+                print(f"      {loc['file']}:{loc['line']}{tag}")
+            if len(r["locations"]) > 12:
+                print(f"      … and {len(r['locations']) - 12} more")
+            for note in MIGRATION_NOTES.get(r["replacement"], []):
+                print(f"    ! {note}")
+            print()
+        print("A model bump is not a string swap. Read the notes above, then verify "
+              "with a real request — not a type-check.")
+
+    bad = [r for r in rows if r["severity"] in ("retired", "deprecated", "stale")]
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
