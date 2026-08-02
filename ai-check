@@ -55,6 +55,30 @@ if [ -z "$auth" ]; then
     fi
 fi
 
+echo "── Plan entitlement (what the /model picker can see)"
+# The silent failure this catches: with setup-token auth everything LOOKS
+# healthy — inference works, `claude -p --model fable` works, /usage shows the
+# plan — but ~/.claude.json's `oauthAccount` is never populated, because a
+# setup-token carries no account record. The interactive /model picker reads
+# that record to decide plan entitlement, finds nothing, assumes no
+# subscription, and gates Fable behind "Usage Credits". If extra usage is also
+# off, Fable just silently disappears from the picker with no error anywhere.
+python3 - "$HOME/.claude.json" <<'PY'
+import json, sys
+try:
+    acct = json.load(open(sys.argv[1])).get("oauthAccount")
+except Exception:
+    acct = None
+if not acct:
+    print("  ⚠️ no account record in ~/.claude.json (oauthAccount is null)")
+    print("     Inference works, but the /model picker cannot see your plan and")
+    print("     will gate Fable behind 'Usage Credits'. This is token-only auth.")
+    print("     Fix: claude-relogin.sh   (then /login, then claude-relogin.sh --save)")
+else:
+    tier = acct.get("organizationRateLimitTier") or acct.get("organizationType") or "unknown tier"
+    print(f"  ✅ account record present ({tier}) — picker can see your plan")
+PY
+
 echo "── Permission mode"
 mode=$(python3 -c 'import json; print(json.load(open("'"$HOME"'/.claude/settings.json")).get("permissions",{}).get("defaultMode",""))' 2>/dev/null)
 if [ "$mode" = "bypassPermissions" ]; then

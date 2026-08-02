@@ -40,15 +40,24 @@ if [ -n "${CLAUDE_CREDENTIALS_JSON:-}" ]; then
         # Claude Code's auth order, and refresh tokens are single-use — once
         # any install rotates the family, the snapshot in the secret is dead
         # and seeding it SHADOWS the (valid, 1-year) setup-token → login
-        # screen. So: never seed expired credentials when a token is present.
-        if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && cred_expired "$tmp"; then
-            echo "  ⚠️ CLAUDE_CREDENTIALS_JSON is EXPIRED — NOT seeding it (it would shadow the valid CLAUDE_CODE_OAUTH_TOKEN)"
+        # screen. So: NEVER seed an expired credential. Not "not when a token
+        # is present" — never. A dead snapshot has no value in any scenario
+        # (its refresh token is dead too), and it outranks every other auth
+        # path, so seeding it can only ever break something. The old
+        # token-present condition let the dead June snapshot land on any box
+        # whose token env var wasn't visible yet at seed time.
+        if cred_expired "$tmp"; then
+            echo "  ⚠️ CLAUDE_CREDENTIALS_JSON is EXPIRED — NOT seeding it (a dead credential outranks and shadows every other auth path)"
             # If an earlier run seeded this same dead snapshot, remove it so it
             # stops shadowing the token. Only a byte-identical file is ours to
             # remove — a live file Claude has refreshed never matches.
             if [ -f "$CRED" ] && cmp -s "$tmp" "$CRED"; then
                 rm -f "$CRED"
-                echo "     removed previously-seeded dead credentials file — token auth now active"
+                if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+                    echo "     removed previously-seeded dead credentials file — token auth now active"
+                else
+                    echo "     removed previously-seeded dead credentials file — run /login to re-authenticate"
+                fi
             fi
         elif [ ! -f "$CRED" ] || [ "$(cred_expiry "$tmp")" -gt "$(cred_expiry "$CRED")" ]; then
             install -m 600 "$tmp" "$CRED"
@@ -75,11 +84,52 @@ PY
 fi
 
 # ── Long-lived OAuth token (from `claude setup-token`) ───────────────────────
-# Always pinned into ~/.claude/settings.json "env" when present so BOTH the
-# CLI and the VS Code extension can use it as a fallback if credentials.json
-# has an expired access token and the refresh also fails.
-if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
-    SETTINGS="$CLAUDE_DIR/settings.json"
+# Pinned into ~/.claude/settings.json "env" as a FALLBACK ONLY — see invariant 6
+# in CLAUDE.md. A setup-token authenticates inference perfectly, but it carries
+# no account record: `oauthAccount` in ~/.claude.json stays null, and the
+# interactive /model picker reads THAT to decide plan entitlement. With no
+# record it assumes no subscription and gates Fable behind "Usage Credits" —
+# which, with extra usage off org-wide, means Fable is simply unavailable in the
+# picker even though `--model fable` works fine. A live credentials.json (what
+# an interactive /login writes) does carry the record, so whenever one exists we
+# REMOVE the pin and leave the credential authoritative.
+cred_live() { [ -f "$1" ] && cred_valid "$1" && ! cred_expired "$1"; }
+
+SETTINGS="$CLAUDE_DIR/settings.json"
+
+if cred_live "$CRED"; then
+    # Live login credential present — unpin the token so it can't shadow the
+    # account record. The token stays in the Codespaces secret for recovery.
+    if [ -f "$SETTINGS" ] && grep -q '"CLAUDE_CODE_OAUTH_TOKEN"' "$SETTINGS" 2>/dev/null; then
+        CLAUDE_SETTINGS_FILE="$SETTINGS" python3 <<'PY'
+import json, os, sys
+p = os.environ["CLAUDE_SETTINGS_FILE"]
+try:
+    cfg = json.load(open(p))
+except Exception:
+    if os.path.getsize(p) > 2:      # invariant 5: never clobber a live file
+        sys.exit(3)
+    cfg = {}
+env = cfg.get("env", {})
+if env.pop("CLAUDE_CODE_OAUTH_TOKEN", None) is None:
+    sys.exit(4)                     # nothing to do
+if env:
+    cfg["env"] = env
+else:
+    cfg.pop("env", None)
+tmp = p + ".tmp." + str(os.getpid())
+with open(tmp, "w") as f:
+    json.dump(cfg, f, indent=2)
+os.chmod(tmp, 0o600)
+os.replace(tmp, p)
+PY
+        case $? in
+            0) echo "  ✅ live login credential present — unpinned CLAUDE_CODE_OAUTH_TOKEN so the /model picker sees your plan" ;;
+            3) echo "  ⚠️ ~/.claude/settings.json is not valid JSON — left untouched" ;;
+        esac
+    fi
+    configured=1
+elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
     [ -f "$SETTINGS" ] || echo '{}' > "$SETTINGS"
     CLAUDE_SETTINGS_FILE="$SETTINGS" python3 <<'PY'
 import json, os, sys
@@ -103,6 +153,9 @@ PY
     if [ "$rc" -eq 0 ]; then
         chmod 600 "$SETTINGS"
         echo "  ✅ CLAUDE_CODE_OAUTH_TOKEN wired into ~/.claude/settings.json env (CLI + extension)"
+        echo "     ℹ️ token-only auth: inference works everywhere, but the /model picker"
+        echo "        cannot see your plan and will gate Fable. Run 'claude-relogin.sh'"
+        echo "        then /login to get a real account record."
         configured=1
     elif [ "$rc" -eq 3 ]; then
         echo "  ⚠️ ~/.claude/settings.json is not valid JSON — left untouched; token available via env only"

@@ -17,6 +17,8 @@ workflow — run it to re-verify any time).
    copy of the old refresh token. Therefore credential snapshots
    (`CLAUDE_CREDENTIALS_JSON`) always decay — they are opt-in only
    (`setup-secrets.sh --with-creds`) and must never become the primary path.
+   **Caveat:** token-first buys *reliability*, not *entitlement* — a token
+   alone leaves the `/model` picker blind to your plan. See invariant 6.
 
 2. **The shadowing bug (worst failure in this repo's history).** In Claude
    Code's auth precedence, `~/.claude/.credentials.json` OUTRANKS the
@@ -44,16 +46,36 @@ workflow — run it to re-verify any time).
    chmod 600); unparseable non-trivial files are LEFT UNTOUCHED (`sys.exit(3)`
    pattern). A `cfg = {}` fallback once wiped the user's login + bypass mode.
 
-6. **`install.sh` must never die halfway** — no `set -e`, every step
+6. **Token auth carries no account record — which silently breaks the `/model`
+   picker.** A `claude setup-token` credential authenticates inference
+   perfectly, but carries no account/plan data, so `oauthAccount` in
+   `~/.claude.json` is never populated. The interactive picker reads *that
+   record* to decide plan entitlement; finding none it assumes no subscription
+   and gates Fable behind "Usage Credits" — and with extra usage off org-wide
+   (`cachedExtraUsageDisabledReason: "org_level_disabled"`) Fable becomes
+   unselectable outright. **Nothing errors.** Inference works, `/usage` shows
+   the plan correctly, and `claude -p --model fable` runs genuine Fable 5
+   (verified via `--output-format json` → `modelUsage`). Only the picker is
+   wrong — which is how this went unnoticed for ~2 months. Therefore:
+   `claude-auth.sh` pins `CLAUDE_CODE_OAUTH_TOKEN` **only as a fallback** and
+   actively unpins it once a live `credentials.json` exists; `ai-check`
+   reports a missing record under "Plan entitlement"; and `claude-relogin.sh`
+   drives the recovery — an interactive `/login` is the ONLY thing that mints
+   the record — then publishes the fresh credential to the user Codespaces
+   secret *and* the repo Actions copy, so new codespaces on every repo inherit
+   it. Keep `creds-and-token`, `token-unpinned-when-creds-arrive` and
+   `relogin-prep-and-restore` green.
+
+7. **`install.sh` must never die halfway** — no `set -e`, every step
    best-effort, everything logged to `~/.dotfiles-install.log`. Never echo
    secret *values* into logs.
 
-7. **GitHub user-level Codespaces secrets have no "all repos" visibility**
+8. **GitHub user-level Codespaces secrets have no "all repos" visibility**
    (org secrets do, user secrets don't). Grants are explicit per-repo via
    `PUT /user/codespaces/secrets/<name>/repositories`. There is **no API at
    all** for the "Automatically install dotfiles" account toggle.
 
-8. **The persistent Claude TUI lives in tmux** (`claude-tmux.sh`), and getting
+9. **The persistent Claude TUI lives in tmux** (`claude-tmux.sh`), and getting
    it to open *straight to a usable full-auto prompt* depends on THREE
    non-obvious gates — all THREE must be cleared or the detached pane hangs on a
    dialog (and you can't see it without attaching). Each was verified in a REAL
@@ -96,11 +118,13 @@ workflow — run it to re-verify any time).
 ## Architecture (read order)
 
 - `install.sh` — entrypoint GitHub runs at codespace creation
-- `claude-auth.sh` — auth seeding (see invariants 1–2)
+- `claude-auth.sh` — auth seeding (see invariants 1–2, 6)
 - `vscode-setup.sh` — background extension installer (invariant 4)
 - `session-init.sh` — `.bashrc` hook: self-heals auth/extension/keep-alive/tmux
 - `claude-tmux.sh` — starts (and re-creates after stop/start) the detached
-  full-auto Claude tmux session; pre-trusts the workspace (see invariant 8)
+  full-auto Claude tmux session; pre-trusts the workspace (see invariant 9)
+- `claude-relogin.sh` — recovers a real account record when the `/model` picker
+  can't see your plan / won't offer Fable (invariant 6)
 - `cs_keepalive.sh` — holds a real client session (`gh codespace ssh` to self)
   while Claude works; releases it when idle so the box can stop. See the
   keep-alive invariant below.

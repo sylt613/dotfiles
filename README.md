@@ -192,3 +192,21 @@ ai-check                                   # confirm
 - `/workspaces/.codespaces/.persistedshare/creation.log` — GitHub's creation log
 - `printenv | grep -E 'CLAUDE|GH_'` — confirms which secrets reached the
   codespace (empty ⇒ secret not granted to this repo, or needs a restart)
+
+### The `/model` picker won't offer Fable (or shows "Usage Credits")
+
+Not a billing problem, and not the stale-tier bug from the upstream issue.
+Token auth (`claude setup-token`) has no account record attached, so
+`oauthAccount` in `~/.claude.json` stays `null`, the picker can't see your plan,
+and it gates Fable. Nothing errors — inference works and `claude -p --model
+fable` even runs real Fable; only the picker is wrong.
+
+```bash
+ai-check                     # "Plan entitlement" section says if you're hit
+claude-relogin.sh            # prepares the box
+env -u CLAUDE_CODE_OAUTH_TOKEN claude   # then: /login  (reload the VS Code window after)
+claude-relogin.sh --save     # publish the fresh credential to every repo
+```
+
+Only an interactive `/login` mints the account record — no script can do it for
+you. `claude-relogin.sh --restore` undoes the prep if the login fails.

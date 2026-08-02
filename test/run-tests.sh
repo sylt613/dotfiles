@@ -141,7 +141,7 @@ CURRENT="syntax"
 say "▶ $CURRENT"
 for f in "$ROOT"/install.sh "$ROOT"/claude-auth.sh "$ROOT"/vscode-setup.sh \
          "$ROOT"/cs_keepalive.sh "$ROOT"/claude-tmux.sh "$ROOT"/session-init.sh \
-         "$ROOT"/ai-check "$ROOT"/test/run-tests.sh; do
+         "$ROOT"/claude-relogin.sh "$ROOT"/ai-check "$ROOT"/test/run-tests.sh; do
     bash -n "$f" && ok "bash -n $(basename "$f")" || bad "syntax error in $f"
 done
 
@@ -315,16 +315,80 @@ printf '%s' "$DEAD_CREDS" > "$H/.claude/.credentials.json"
 TEST_WAIT=3 run_install CLAUDE_CREDENTIALS_JSON="$DEAD_CREDS" CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-FRESH"
 assert_nofile "$H/.claude/.credentials.json"
 
-# ── 9. creds + token together: both live — creds seeded AND token pinned ─────
-# (refresh tokens are single-use; the static setup-token in settings env is the
-# rotation-proof fallback if the credentials family dies)
+# ── 8c. dead creds, NO token: still must not be seeded ───────────────────────
+# A dead snapshot is worthless in every scenario (its refresh token is dead
+# too) and it outranks every other auth path — so the "don't seed" rule is
+# unconditional, not "only when a token is present". The old conditional let
+# the dead snapshot land on any box whose token wasn't visible at seed time,
+# which is how a two-month-expired credential survived on a live machine.
+CURRENT="dead-creds-not-seeded-without-token"
+say "▶ $CURRENT"
+new_sandbox
+TEST_WAIT=3 run_install CLAUDE_CREDENTIALS_JSON="$DEAD_CREDS"
+assert_nofile "$H/.claude/.credentials.json"
+assert_grep "$H/.dotfiles-install.log" "NOT seeding" "shadow-prevention logged with no token present"
+
+# ── 9. creds + token together: creds win, token UNPINNED ─────────────────────
+# A setup-token authenticates inference fine but carries no account record, so
+# ~/.claude.json's oauthAccount stays null and the interactive /model picker —
+# which reads that record for plan entitlement — gates Fable behind "Usage
+# Credits". A live credentials.json DOES carry the record. So when one exists
+# the token must be unpinned, or it shadows the plan and Fable stays gated.
+# The token remains in the Codespaces secret as the recovery path.
 CURRENT="creds-and-token"
 say "▶ $CURRENT"
 new_sandbox
 TEST_WAIT=3 run_install CLAUDE_CREDENTIALS_JSON="$CREDS_JSON" CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-STALE"
 assert_grep "$H/.claude/.credentials.json" "sk-ant-oat01-TESTTOKEN" "credentials file seeded"
-assert_grep "$H/.claude/settings.json" "sk-ant-oat01-STALE" "static token pinned as fallback alongside creds"
+assert_nogrep "$H/.claude/settings.json" "sk-ant-oat01-STALE" "token unpinned so the /model picker sees the plan"
 assert_file "$H/.dotfiles-state/auth-configured"
+
+# ── 9b. the post-/login transition: pinned token must be actively removed ────
+# This is the exact sequence after a real /login on a token-only box: the pin
+# is already in settings.json when a live credential appears. Leaving it there
+# would keep Fable gated, so claude-auth.sh has to strip it on the next run.
+CURRENT="token-unpinned-when-creds-arrive"
+say "▶ $CURRENT"
+new_sandbox
+TEST_WAIT=3 run_install CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-PINNED"
+assert_grep "$H/.claude/settings.json" "sk-ant-oat01-PINNED" "token pinned while it is the only auth"
+printf '%s' "$CREDS_JSON" > "$H/.claude/.credentials.json"   # simulate /login
+env -i HOME="$H" TERM=dumb PATH="$MOCKS:/usr/local/bin:/usr/bin:/bin" \
+    CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-PINNED" \
+    bash "$ROOT/claude-auth.sh" >>"$H/.dotfiles-install.log" 2>&1
+assert_nogrep "$H/.claude/settings.json" "sk-ant-oat01-PINNED" "pin removed once a live credential exists"
+assert_grep "$H/.claude/.credentials.json" "sk-ant-oat01-TESTTOKEN" "login credential left intact"
+assert_grep "$H/.claude/settings.json" '"defaultMode": "bypassPermissions"' "unpin preserved the rest of settings.json"
+
+# ── 9c. claude-relogin.sh: prepare / restore round-trip ──────────────────────
+# Prepare must leave the box in a state where an interactive /login can
+# actually take: no dead credential outranking it, no token pin shadowing it.
+# Restore must be a true inverse, so a failed login is never a lockout.
+CURRENT="relogin-prep-and-restore"
+say "▶ $CURRENT"
+new_sandbox
+TEST_WAIT=3 run_install CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-PINNED"
+printf '%s' "$DEAD_CREDS" > "$H/.claude/.credentials.json"
+env -i HOME="$H" TERM=dumb PATH="$MOCKS:/usr/local/bin:/usr/bin:/bin" \
+    bash "$ROOT/claude-relogin.sh" >"$SB/relogin.log" 2>&1 \
+    && ok "claude-relogin.sh exit 0" || bad "claude-relogin.sh exited non-zero"
+assert_nofile "$H/.claude/.credentials.json"
+assert_nogrep "$H/.claude/settings.json" "sk-ant-oat01-PINNED" "token unpinned for /login"
+assert_file "$H/.claude/settings.json.pre-relogin"
+assert_grep "$H/.claude/settings.json" '"defaultMode": "bypassPermissions"' "prepare preserved the rest of settings.json"
+assert_grep "$SB/relogin.log" "/login" "prepare printed the interactive next steps"
+
+env -i HOME="$H" TERM=dumb PATH="$MOCKS:/usr/local/bin:/usr/bin:/bin" \
+    bash "$ROOT/claude-relogin.sh" --restore >>"$SB/relogin.log" 2>&1
+assert_grep "$H/.claude/settings.json" "sk-ant-oat01-PINNED" "restore put the token pin back"
+assert_nofile "$H/.claude/settings.json.pre-relogin"
+
+# --save must REFUSE to publish when the login didn't actually take, otherwise
+# it would broadcast a token-only/dead state to every repo.
+env -i HOME="$H" TERM=dumb PATH="$MOCKS:/usr/local/bin:/usr/bin:/bin" \
+    bash "$ROOT/claude-relogin.sh" --save >"$SB/relogin-save.log" 2>&1
+if [ $? -ne 0 ]; then ok "--save refuses when oauthAccount is still null"; else bad "--save published a state with no account record"; fi
+assert_grep "$SB/relogin-save.log" "STILL null" "--save explains why it refused"
 
 # ── 10. claude-tmux is a no-op when a session is already running ─────────────
 CURRENT="tmux-noop-when-running"

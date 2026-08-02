@@ -302,5 +302,11 @@ echo "  ✅ ~/.bashrc hook installed (re-seeds auth / extension / keep-alive on 
 install -m 755 "$DOTFILES_DIR/ai-check" "$HOME/.local/bin/ai-check" 2>/dev/null \
     && echo "🩺 Run 'ai-check' in any terminal to verify the setup"
 
+# ── claude-relogin helper ────────────────────────────────────────────────────
+# Recovers a real account record when only token auth is present (otherwise the
+# /model picker can't see the plan and gates Fable). See invariant 6.
+install -m 755 "$DOTFILES_DIR/claude-relogin.sh" "$HOME/.local/bin/claude-relogin.sh" 2>/dev/null \
+    && echo "🔓 Run 'claude-relogin.sh' if the /model picker won't offer Fable"
+
 echo "✅ Done! ($(date '+%F %T'))"
 exit 0
