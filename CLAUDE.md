@@ -95,10 +95,24 @@ workflow — run it to re-verify any time).
      non-clobber per invariant 5). The folder-trust dialog ("Is this a project
      you trust?") is a separate gate that nothing else satisfies.
    "Stay awake" mirrors the Fly watchdog at
-   `flyio-instance-control/v1-claude/keepalive.sh` — force flag, OR Claude
-   processes burned >= `BUSY_JIFFIES` of CPU in the last poll, OR a transcript
-   `.jsonl` write within the grace window. A Claude process must exist for the
-   transcript signal to count (else a stale file pins the box).
+   `flyio-instance-control/v1-claude/keepalive.sh` — force flag, OR the Claude
+   process tree burned >= `BUSY_JIFFIES` of CPU in the last poll, OR the newest
+   **timestamped transcript entry** is inside the grace window. A Claude process
+   must exist for the transcript signal to count (else a stale file pins the box).
+   CPU is summed over Claude's **descendants** too: a long build burns its CPU in
+   a child while `claude` itself waits, and counting only the roots reads a
+   running build as idle. (The script runs as a child of init, never under
+   claude, so it cannot measure its own polling.)
+   ⚠️ **Never use transcript file mtime as the activity signal** — that was the
+   bug fixed 2026-08-05. Claude Code rewrites quiet transcripts in place
+   (`last-prompt` / `ai-title` / `mode` lines, plus a housekeeping pass), so
+   mtime runs *ahead* of the last real message — measured at +1h37m and +2h17m on
+   two live transcripts, and one abandoned session was re-touched every ~22 min
+   for six hours. Against the 15-min window that produced a sawtooth (release,
+   re-hold, release) so the 30-min GitHub idle timeout never ran to completion:
+   7 of 31.6 held hours in one week were bought by nothing. mtime is now only a
+   cheap pre-filter, which is sound in one direction only (a rewrite can only
+   move mtime forward, so a file stale by mtime cannot be fresh by content).
    Two of the Fly script's four signals are deliberately NOT ported, because
    both were measured on a live codespace and neither discriminates here:
    `any_attached` (all 4 tmux sessions report `session_attached=1` at all times)
@@ -109,6 +123,18 @@ workflow — run it to re-verify any time).
    `BUSY_JIFFIES` defaults to 3% average CPU, not Fly's ~1%, for the same
    repaint reason. Every decision logs its CPU delta so it can be recalibrated
    from real data.
+   ⚠️ **The holder subshell must `exec 9>&-` before it execs.** Otherwise it
+   inherits the singleton flock, and a SIGKILLed supervisor leaves its ssh holder
+   owning both the lock *and* a live client session: the box is pinned awake with
+   no watchdog, and every replacement supervisor is refused the lock and exits
+   **silently** (the old code exited before its first log line), so `session-init`
+   retries forever and nothing is ever logged. Observed live 2026-08-05 with pids
+   13806/13808 holding fd 9. This is how a codespace runs for *days*, not hours —
+   far more expensive than the mtime sawtooth. Belt and braces: startup now also
+   detects a lock held with no live supervisor behind it, reaps the orphan and
+   takes over, logging `recovered a wedged lock`. Regression drill: `kill -9` the
+   supervisor, confirm the lock reads FREE, start a replacement, confirm it logs
+   `reaped N orphaned holder process(es)`.
    ⚠️ **Do not "verify" the no-dialog launch locally inside a Claude session.**
    A Claude you spawn inherits `CLAUDE_CODE_CHILD_SESSION=1`/`CLAUDECODE=1` and
    skips the bypass warning, so every local repro looks clean and lies. The only

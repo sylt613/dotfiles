@@ -26,16 +26,18 @@
 # COST: while held, the codespace never idles out, so it bills core-hours
 #   continuously. That is why this is conditional — see ACTIVE below.
 #
-# ACTIVE  = a Claude Code process is running  AND  some session transcript under
-#           ~/.claude/projects was appended to within IDLE_WINDOW seconds.
+# ACTIVE  = a Claude Code process is running  AND  the newest *timestamped entry*
+#           in any session transcript is younger than IDLE_WINDOW seconds.
 #           Both must hold. Rationale for this signal over the alternatives:
 #             - bare process/tmux-session existence: a Claude sitting at its
 #               prompt for days would pin the box alive 24/7 and burn money.
 #             - tmux #{window_activity}: unreliable here — every session on this
 #               box reports "0s ago" because the TUI repaints, so it can never
 #               distinguish working from idle.
-#             - transcript mtime alone: a leftover file could look fresh after
-#               the process is gone; pairing it with the process check fixes it.
+#             - transcript FILE MTIME: this is what the script used until
+#               2026-08-05 and it is actively wrong — see activity_age() for the
+#               measurements. Claude Code rewrites quiet transcripts in place, so
+#               mtime kept re-arming the grace window and the box never idled out.
 #
 # FAIL-SAFE: runs as the normal codespace user, never root. Singleton via flock.
 #   Every failure is caught and logged; nothing here can signal or kill another
@@ -78,12 +80,6 @@ trim_log() {
 
 [ -n "${CODESPACE_NAME:-}" ] || { log "not a codespace (no CODESPACE_NAME) — exiting"; exit 0; }
 
-# Singleton. If another copy holds the lock, leave quietly.
-exec 9>"/tmp/.cs_keepalive.lock" 2>/dev/null || exit 0
-flock -n 9 || exit 0
-
-log "keepalive starting (pid $$, codespace $CODESPACE_NAME, idle_window=${IDLE_WINDOW}s)"
-
 HOLDER_PID=""
 LAST_PAT_WARN=0
 # Distinctive marker so we can find our own held sessions and nothing else.
@@ -91,8 +87,7 @@ HOLD_MARK="cs-keepalive-hold"
 
 # If a previous supervisor was SIGKILLed (uncatchable, so the trap never ran),
 # its ssh child survives as an orphan and would keep the box alive forever with
-# nothing watching it. We hold the flock, so any holder alive right now is
-# stale by definition.
+# nothing watching it.
 # True if $1 is us or descends from us. Guards reap_orphans against killing a
 # holder that belongs to a *live* supervisor: if the lock file is ever removed
 # by hand two copies can run at once, and an unguarded marker-wide `kill -9`
@@ -117,6 +112,48 @@ reap_orphans() {
     [ "$n" -gt 0 ] && log "reaped $n orphaned holder process(es) from a previous run"
     return 0
 }
+
+# Is a *real* supervisor (another copy of this script) alive? Only an argv that
+# actually ends in the script name counts — `pgrep -f` alone would also match a
+# shell that merely mentions the path, e.g. someone grepping for it.
+supervisor_alive() {
+    local p argv
+    for p in $(pgrep -f 'cs_keepalive\.sh' 2>/dev/null); do
+        [ "$p" = "$$" ] && continue
+        argv=$(tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null)
+        case "$argv" in *cs_keepalive.sh|*cs_keepalive.sh\ *) return 0 ;; esac
+    done
+    return 1
+}
+
+# Singleton — plus recovery from a lock wedged by a supervisor-less holder.
+#
+# THE BUG THIS RECOVERS FROM (fixed at source in start_holder, kept here for
+# pre-fix orphans and for any future way a supervisor can die uncleanly):
+# start_holder's subshell used to inherit fd 9, so a SIGKILLed supervisor left
+# its ssh holder owning BOTH the flock AND a live client session. The codespace
+# then stayed awake indefinitely with nothing watching it, and every replacement
+# supervisor died silently right here — session-init.sh sees no supervisor, so
+# it starts one, `flock -n` refuses, repeat forever. Nothing logged, because the
+# old code exited before the first log line. Observed live on 2026-08-05: pids
+# 13806/13808 held /tmp/.cs_keepalive.lock on fd 9 with no supervisor alive.
+# A held session that no watchdog can ever release is exactly how this box ran
+# for days at a stretch.
+exec 9>"/tmp/.cs_keepalive.lock" 2>/dev/null || exit 0
+if ! flock -n 9; then
+    if supervisor_alive; then
+        exit 0                      # a healthy sibling owns it — leave quietly
+    fi
+    reap_orphans                    # lock held by holders with nobody behind them
+    # Wait rather than -n: short-lived children (the poll `sleep`) also inherit
+    # fd 9, so a dead supervisor can leave the lock briefly held by a sleep that
+    # is harmless and about to exit. No live supervisor exists at this point —
+    # we just checked — so blocking here cannot deadlock against a real one.
+    flock -w 90 9 || { log "lock still held after reaping orphans — exiting"; exit 0; }
+    log "recovered a wedged lock (orphaned holder owned it, no supervisor alive)"
+fi
+
+log "keepalive starting (pid $$, codespace $CODESPACE_NAME, idle_window=${IDLE_WINDOW}s)"
 reap_orphans
 
 claude_running() {
@@ -124,34 +161,89 @@ claude_running() {
         || pgrep -f '\.local/bin/claude' >/dev/null 2>&1
 }
 
-# Total CPU jiffies (utime+stime) across the real Claude CLI processes.
-# `pgrep -x claude` matches comm == "claude" exactly, so it skips tmux, the
-# launcher and this script. Verified on this box: comm really is "claude" and
-# pgrep -x finds all live sessions. The node fallback catches an npm-installed
-# CLI, whose comm is "node" — without it the busy signal silently reads zero.
+# The real Claude CLI processes. `pgrep -x claude` matches comm == "claude"
+# exactly, so it skips tmux, the launcher and this script. Verified on this box:
+# comm really is "claude" and pgrep -x finds all live sessions. The node
+# fallback catches an npm-installed CLI, whose comm is "node" — without it the
+# busy signal silently reads zero.
+claude_roots() {
+    { pgrep -x claude 2>/dev/null
+      for pid in $(pgrep -x node 2>/dev/null); do
+          tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q 'claude' && echo "$pid"
+      done
+    } | sort -u
+}
+
+# Total CPU jiffies (utime+stime) across those roots AND every descendant.
+#
+# Descendants are counted deliberately: when Claude shells out to a long build
+# the CPU is burned by the child while `claude` itself sits near-idle waiting on
+# it. Summing the roots alone reads a running build as "not working", and with
+# the transcript signal also quiet during a build (no entry is written until the
+# tool returns) that would put the box to sleep mid-build.
+#
+# This cannot feed back into itself: the script runs as a child of init
+# (verified on this box, ppid 1), never underneath a claude process, so neither
+# its own polling nor the held ssh session lands in this sum.
 claude_cpu() {
-    local total=0 pid stat
-    for pid in $(pgrep -x claude 2>/dev/null); do
+    local roots all frontier next total=0 pid stat
+    roots=$(claude_roots)
+    [ -n "$roots" ] || { echo 0; return; }
+    all="$roots"; frontier="$roots"
+    while [ -n "$frontier" ]; do
+        next=$(ps -o pid= --ppid "$(echo $frontier | tr ' ' ',')" 2>/dev/null | tr -d ' ' | sort -u)
+        [ -n "$next" ] || break
+        next=$(comm -13 <(printf '%s\n' $all | sort -u) <(printf '%s\n' $next))
+        [ -n "$next" ] || break
+        all=$(printf '%s\n%s\n' "$all" "$next")
+        frontier="$next"
+    done
+    for pid in $all; do
         stat=$(cat "/proc/$pid/stat" 2>/dev/null) || continue
         stat=${stat##*) }            # strip "pid (comm) "; robust to parens in comm
         set -- $stat                 # after strip: utime=field 12, stime=field 13
         total=$(( total + ${12:-0} + ${13:-0} ))
     done
-    for pid in $(pgrep -x node 2>/dev/null); do
-        tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q 'claude' || continue
-        stat=$(cat "/proc/$pid/stat" 2>/dev/null) || continue
-        stat=${stat##*) }
-        set -- $stat
-        total=$(( total + ${12:-0} + ${13:-0} ))
-    done
     echo "$total"
 }
 
-transcript_fresh() {
-    # Any Claude transcript appended to within IDLE_WINDOW seconds?
-    local mins=$(( (IDLE_WINDOW + 59) / 60 ))
-    [ -n "$(find "$HOME/.claude/projects" "$HOME/.claude/sessions" \
-             -name '*.jsonl' -mmin "-$mins" -print -quit 2>/dev/null)" ]
+# Age in seconds of the newest genuine conversation activity across all session
+# transcripts; 999999 when there is none.
+#
+# This deliberately does NOT trust the file mtime. Claude Code rewrites a
+# transcript in place long after its session has gone quiet: metadata-only lines
+# (last-prompt / ai-title / mode) and a periodic housekeeping pass both bump
+# mtime without adding a word of conversation. Measured here on 2026-08-05, two
+# transcripts carried mtimes 1h37m and 2h17m newer than their last timestamped
+# entry, and one abandoned session was re-touched every ~22 min for six hours
+# straight. Against a 15-minute window that produced a sawtooth — release,
+# re-hold, release — so the 30-minute GitHub idle timeout never once ran to
+# completion and the box stayed billable for days. In the logged week, 7 of the
+# 31.6 held hours were bought by nothing but a rewritten mtime. Killing that is
+# the entire reason this function reads entries instead of stat().
+#
+# mtime is still used as a cheap PRE-FILTER, which is sound in one direction
+# only: a rewrite can only ever move mtime forward, so mtime is an upper bound
+# on freshness and a file that already looks stale by mtime cannot be fresh by
+# content. Whatever survives the filter is then read for real.
+activity_age() {
+    local mins now newest=0 f ts e
+    mins=$(( (IDLE_WINDOW + 59) / 60 ))
+    now=$(date +%s)
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        # Transcripts reach tens of MB; only the tail can hold the last entry.
+        ts=$(tail -c 262144 "$f" 2>/dev/null \
+             | grep -o '"timestamp":"[0-9TZ:.+-]*"' | tail -n 1 | cut -d'"' -f4)
+        if [ -z "$ts" ]; then
+            e="$now"                 # unreadable tail — fail SAFE, treat as live
+        else
+            e=$(date -u -d "$ts" +%s 2>/dev/null) || e=0
+        fi
+        [ "${e:-0}" -gt "$newest" ] && newest=$e
+    done < <(find "$HOME/.claude/projects" "$HOME/.claude/sessions" \
+                  -name '*.jsonl' -mmin "-$mins" 2>/dev/null)
+    if [ "$newest" -eq 0 ]; then echo 999999; else echo $(( now - newest )); fi
 }
 
 # Decide whether the box should stay awake. Mirrors the Fly watchdog's
@@ -166,21 +258,21 @@ transcript_fresh() {
 # 24/7 and bill around the clock. That is the whole reason they are not here.
 #
 # KEPT: the force flag, the CPU-burn signal (the good one — it tracks Claude
-# actually thinking/streaming/running tools) and the transcript grace window,
-# which is the signal already proven in production on this box to flip to idle
-# and let it stop.
+# actually thinking/streaming/running tools) and a grace window after the last
+# real conversation entry, which bridges the gap while a tool call is in flight.
 REASON=""
 should_keep() {
-    local delta="$1"
+    local delta="$1" age
     if [ -f "$FORCE_FLAG" ]; then REASON="forced(flag)"; return 0; fi
     if ! claude_running; then REASON="no-claude(cpu ${delta}j)"; return 1; fi
     if [ "$delta" -ge "$BUSY_JIFFIES" ]; then
         REASON="busy(cpu ${delta}j/${BUSY_JIFFIES}j)"; return 0
     fi
-    if transcript_fresh; then
-        REASON="recent(transcript<${IDLE_WINDOW}s,cpu ${delta}j)"; return 0
+    age=$(activity_age)
+    if [ "$age" -lt "$IDLE_WINDOW" ]; then
+        REASON="recent(activity ${age}s<${IDLE_WINDOW}s,cpu ${delta}j)"; return 0
     fi
-    REASON="idle(transcript>=${IDLE_WINDOW}s,cpu ${delta}j)"; return 1
+    REASON="idle(activity ${age}s>=${IDLE_WINDOW}s,cpu ${delta}j)"; return 1
 }
 
 holder_alive() { [ -n "$HOLDER_PID" ] && kill -0 "$HOLDER_PID" 2>/dev/null; }
@@ -201,6 +293,13 @@ start_holder() {
     # Hold a real client connection open, emitting output so the session is not
     # merely connected but actively producing terminal traffic.
     (
+        # Drop the singleton lock fd before exec'ing. Without this the holder
+        # inherits fd 9 and therefore the flock, so if the supervisor is ever
+        # SIGKILLed the surviving holder keeps BOTH the lock and the client
+        # session: the box is pinned awake with no watchdog, and every
+        # replacement supervisor is silently refused the lock forever. This one
+        # line is the fix; the recovery path at the flock is the safety net.
+        exec 9>&-
         export GH_TOKEN="$GH_CODESPACE_PAT"
         exec timeout "$SSH_LEASE" gh codespace ssh -c "$CODESPACE_NAME" -- \
             "while true; do echo $HOLD_MARK \$(date -u +%H:%M:%S); sleep 30; done"
